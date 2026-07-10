@@ -1,0 +1,26 @@
+{
+  "name": "etsy-api-test",
+  "version": "1.0.0",
+  "description": "Local Etsy Open API v3 OAuth and shop data test backend.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "etsy",
+    "oauth",
+    "open-api-v3"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mysql2": "^3.22.6"
+  }
+}
