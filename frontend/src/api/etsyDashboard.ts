@@ -52,7 +52,10 @@ export function createFallbackEtsyDashboard(): EtsyDashboardResponse {
       dueSoon: 0,
       overdue: 0,
       shipped: 0,
+      unpaid: 0,
+      canceled: 0,
       items: [],
+      orders: [],
     },
     ads: {
       status: 'missing',

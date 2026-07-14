@@ -37,7 +37,7 @@ export const periodDashboardData: Record<PeriodKey, DashboardPeriodData> = {
       { key: 'adSpend', title: '广告花费', value: '$46', note: '使用日预算 88%', tone: 'amber' },
       { key: 'adRevenue', title: '广告销售额', value: '$168', note: 'ROAS 3.65', tone: 'blue' },
       { key: 'favorites', title: '收藏数', value: '58', note: '收藏率 8.4%', tone: 'red' },
-      { key: 'conversations', title: '客户咨询', value: '5', note: '3 条来自定制需求', tone: 'amber' },
+      { key: 'logistics', title: '物流费用', value: '¥128.60', note: '5 单 / 来自 n8n 物流表', tone: 'amber' },
       { key: 'best', title: '今日最佳出品', value: 'Birth Flower', note: '2 单 / $136 收入', tone: 'blue' },
     ],
     trends: [
@@ -75,7 +75,7 @@ export const periodDashboardData: Record<PeriodKey, DashboardPeriodData> = {
       { key: 'adSpend', title: '广告花费', value: '$318', note: '占收入 11.2%', tone: 'amber' },
       { key: 'adRevenue', title: '广告销售额', value: '$1,126', note: 'ROAS 3.54', tone: 'blue' },
       { key: 'favorites', title: '收藏数', value: '386', note: '收藏率 7.9%', tone: 'red' },
-      { key: 'conversations', title: '客户咨询', value: '28', note: '7 条来自定制需求', tone: 'amber' },
+      { key: 'logistics', title: '物流费用', value: '¥849.59', note: '20 单 / 来自 n8n 物流表', tone: 'amber' },
       { key: 'best', title: '当周最佳出品', value: 'Birth Flower', note: '9 单 / $612 收入', tone: 'blue' },
     ],
     trends: [
@@ -111,7 +111,7 @@ export const periodDashboardData: Record<PeriodKey, DashboardPeriodData> = {
       { key: 'adSpend', title: '广告花费', value: '$768', note: '占收入 11.2%', tone: 'amber' },
       { key: 'adRevenue', title: '广告销售额', value: '$2,706', note: 'ROAS 3.52', tone: 'blue' },
       { key: 'favorites', title: '收藏数', value: '1,124', note: '收藏率 8.1%', tone: 'red' },
-      { key: 'conversations', title: '客户咨询', value: '76', note: '18 条来自定制需求', tone: 'amber' },
+      { key: 'logistics', title: '物流费用', value: '¥849.59', note: '20 单 / 来自 n8n 物流表', tone: 'amber' },
       { key: 'best', title: '本月最佳出品', value: 'Birth Flower', note: '22 单 / $1,496 收入', tone: 'blue' },
     ],
     trends: [

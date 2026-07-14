@@ -38,6 +38,10 @@
           <DatabaseOutlined />
           <span>库存看板</span>
         </a-menu-item>
+        <a-menu-item v-if="showOperationsPages" key="/orders">
+          <ProfileOutlined />
+          <span>订单状态</span>
+        </a-menu-item>
         <a-menu-item v-if="showOperationsPages" key="/traffic">
           <FundOutlined />
           <span>广告与流量</span>
@@ -116,6 +120,7 @@ import {
   MessageOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  ProfileOutlined,
   SafetyCertificateOutlined,
   ShopOutlined,
   StarOutlined,

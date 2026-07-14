@@ -29,6 +29,9 @@ function emptyPeriod(key: PeriodKey): EtsyFinanceResponse['periods'][PeriodKey] 
       taxes: 0,
       ledgerAdSpend: 0,
       adSpend: 0,
+      logisticsCost: 0,
+      logisticsOrders: 0,
+      logisticsCurrency: 'CNY',
       disbursements: 0,
       other: 0,
       ledgerNetChangeExcludingDisbursement: 0,
@@ -39,6 +42,7 @@ function emptyPeriod(key: PeriodKey): EtsyFinanceResponse['periods'][PeriodKey] 
     },
     trends: [],
     orderRows: [],
+    logisticsRows: [],
     ledgerRows: [],
     feeBreakdown: [],
   }

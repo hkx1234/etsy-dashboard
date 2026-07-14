@@ -2207,7 +2207,7 @@ select {
 }
 
 .etsy-dashboard .fulfillment-metrics.compact {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .etsy-dashboard .fulfillment-stat {
@@ -2655,24 +2655,45 @@ select {
   display: grid;
   grid-template-columns: minmax(220px, 0.34fr) minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .fulfillment-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  min-width: 0;
 }
 
 .fulfillment-metrics.compact {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .fulfillment-stat {
+  min-width: 0;
   min-height: 104px;
   padding: 14px;
   background: #f8fafc;
   border: 1px solid #e6ebf2;
   border-radius: 8px;
+}
+
+.fulfillment-stat-button,
+.order-status-card {
+  width: 100%;
+  border: 1px solid #e6ebf2;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.fulfillment-stat-button:hover,
+.order-status-card:hover,
+.order-status-card.active {
+  border-color: #93c5fd;
+  box-shadow: 0 12px 26px rgba(37, 99, 235, 0.12);
+  transform: translateY(-1px);
 }
 
 .fulfillment-stat span {
@@ -2710,6 +2731,13 @@ select {
   border-radius: 8px;
 }
 
+.fulfillment-table,
+.fulfillment-table .ant-table-wrapper,
+.fulfillment-table .ant-spin-nested-loading,
+.fulfillment-table .ant-spin-container {
+  min-width: 0;
+}
+
 .fulfillment-table .ant-table-thead > tr > th {
   color: #334155;
   background: #f8fafc;
@@ -2724,6 +2752,41 @@ select {
   gap: 4px;
 }
 
+.fulfillment-product-list {
+  display: flex;
+  min-width: 280px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fulfillment-product-cell {
+  display: grid;
+  min-width: 260px;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.fulfillment-product-list .fulfillment-product-cell + .fulfillment-product-cell {
+  padding-top: 8px;
+  border-top: 1px solid #eef2f7;
+}
+
+.order-product-thumb {
+  width: 46px;
+  height: 46px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  object-fit: cover;
+}
+
+.order-product-thumb-empty {
+  display: inline-block;
+  background:
+    linear-gradient(135deg, #f8fafc 0%, #eef2f7 100%);
+}
+
 .fulfillment-product strong {
   display: -webkit-box;
   overflow: hidden;
@@ -2736,6 +2799,27 @@ select {
 .fulfillment-product span {
   color: #64748b;
   font-size: 12px;
+}
+
+.logistics-unmatched {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.order-status-page .page-heading {
+  align-items: center;
+}
+
+.order-status-controls {
+  flex-wrap: nowrap;
+}
+
+.order-status-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.order-status-card {
+  min-height: 116px;
 }
 
 .finance-page {
@@ -3152,7 +3236,8 @@ select {
   .keyword-overview-grid,
   .ad-grid,
   .review-grid,
-  .market-keyword-grid {
+  .market-keyword-grid,
+  .order-status-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3248,7 +3333,8 @@ select {
   .fulfillment-metrics,
   .fulfillment-metrics.compact,
   .ad-grid,
-  .market-keyword-grid {
+  .market-keyword-grid,
+  .order-status-metrics {
     grid-template-columns: 1fr;
   }
 

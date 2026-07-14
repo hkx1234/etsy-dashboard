@@ -71,31 +71,36 @@
         </template>
         <div class="fulfillment-content">
           <div class="fulfillment-metrics compact">
-            <article class="fulfillment-stat">
+            <button type="button" class="fulfillment-stat fulfillment-stat-button" @click="openOrderStatus('pending')">
               <span>待发货订单</span>
               <strong>{{ formatNumber(fulfillment.pendingShipment) }}</strong>
               <p>已付款但还未发货</p>
-            </article>
-            <article class="fulfillment-stat" :class="{ danger: fulfillment.overdue > 0 }">
+            </button>
+            <button
+              type="button"
+              class="fulfillment-stat fulfillment-stat-button"
+              :class="{ danger: fulfillment.overdue > 0 }"
+              @click="openOrderStatus('overdue')"
+            >
               <span>逾期风险</span>
               <strong>{{ formatNumber(fulfillment.overdue) }}</strong>
               <p>预计发货日已过</p>
-            </article>
-            <article class="fulfillment-stat">
+            </button>
+            <button type="button" class="fulfillment-stat fulfillment-stat-button" @click="openOrderStatus('shipped')">
               <span>已发货订单</span>
               <strong>{{ formatNumber(fulfillment.shipped) }}</strong>
               <p>来自已同步订单</p>
-            </article>
+            </button>
           </div>
           <a-table
             class="fulfillment-table"
             :columns="fulfillmentColumns"
             :data-source="fulfillmentActionItems"
             :loading="isSyncing"
-            :locale="{ emptyText: '当前没有需要处理的待发货订单' }"
+            :locale="{ emptyText: '当前没有待发货订单，已同步订单均已发货' }"
             :pagination="false"
             row-key="receiptId"
-            :scroll="{ x: 760 }"
+            :scroll="{ x: 1040 }"
             size="middle"
           >
             <template #bodyCell="{ column, record }">
@@ -111,13 +116,43 @@
                 </a-tag>
               </template>
               <template v-if="column.key === 'productSummary'">
-                <div class="fulfillment-product">
-                  <strong>{{ record.productSummary }}</strong>
-                  <span>{{ formatNumber(record.itemCount) }} 件商品</span>
+                <div v-if="record.productItems?.length" class="fulfillment-product-list">
+                  <div
+                    v-for="(item, index) in record.productItems"
+                    :key="`${record.receiptId}-${item.listingId || index}`"
+                    class="fulfillment-product-cell"
+                  >
+                    <img
+                      v-if="item.imageUrl"
+                      class="order-product-thumb"
+                      :src="item.imageUrl"
+                      :alt="item.title"
+                    />
+                    <span v-else class="order-product-thumb order-product-thumb-empty" aria-hidden="true" />
+                    <div class="fulfillment-product">
+                      <strong>{{ item.title || record.productSummary }}</strong>
+                      <span>{{ formatNumber(item.quantity || 1) }} 件</span>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="fulfillment-product-cell">
+                  <span class="order-product-thumb order-product-thumb-empty" aria-hidden="true" />
+                  <div class="fulfillment-product">
+                    <strong>{{ record.productSummary }}</strong>
+                    <span>{{ formatNumber(record.itemCount) }} 件</span>
+                  </div>
                 </div>
               </template>
               <template v-if="column.key === 'total'">
                 {{ formatMoney(record.total) }}
+              </template>
+              <template v-if="column.key === 'logisticsUnitPrice'">
+                <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsUnitPrice, record.logisticsCurrency) }}/kg</span>
+                <span v-else class="logistics-unmatched">未匹配</span>
+              </template>
+              <template v-if="column.key === 'logisticsTotalAmount'">
+                <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsTotalAmount, record.logisticsCurrency) }}</span>
+                <span v-else class="logistics-unmatched">未匹配</span>
               </template>
             </template>
           </a-table>
@@ -142,6 +177,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
@@ -151,11 +187,12 @@ import { periodOptions } from '@/data/mockData'
 import { createFallbackEtsyDashboard, fetchEtsyDashboard } from '@/api/etsyDashboard'
 import PageLoading from '@/components/PageLoading.vue'
 import type { PeriodKey } from '@/types/business'
-import { formatMoney, formatNumber } from '@/utils/format'
+import { formatCnyMoney, formatMoney, formatNumber } from '@/utils/format'
 
 use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 const selectedPeriod = ref<PeriodKey>('week')
+const router = useRouter()
 const dashboardData = ref(createFallbackEtsyDashboard())
 const selectedDataDate = ref(dashboardData.value.selectedDate)
 const isSyncing = ref(false)
@@ -193,12 +230,24 @@ const fulfillmentColumns = [
   { title: '状态', key: 'fulfillmentStatus', dataIndex: 'fulfillmentStatus', width: 120 },
   { title: '商品', key: 'productSummary', dataIndex: 'productSummary' },
   { title: '金额', key: 'total', dataIndex: 'total', width: 110 },
+  { title: '物流单价', key: 'logisticsUnitPrice', dataIndex: 'logisticsUnitPrice', width: 120 },
+  { title: '物流总金额', key: 'logisticsTotalAmount', dataIndex: 'logisticsTotalAmount', width: 130 },
 ]
 
 function fulfillmentStatusColor(status: string) {
   if (status === '待发货') return 'blue'
   if (status === '已发货') return 'green'
   return 'default'
+}
+
+function openOrderStatus(status: 'pending' | 'overdue' | 'shipped') {
+  router.push({
+    path: '/orders',
+    query: {
+      status,
+      endDate: selectedDataDate.value,
+    },
+  })
 }
 
 async function loadEtsyDashboard(endDate?: string) {

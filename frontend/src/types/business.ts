@@ -21,6 +21,8 @@ export interface WeeklyTrendItem {
   adOrders?: number
   roas?: number
   clickRate?: number
+  logisticsCost?: number
+  logisticsOrders?: number
   favorites: number
   conversations: number
 }
@@ -174,6 +176,9 @@ export interface FinanceSummary {
   taxes: number
   ledgerAdSpend: number
   adSpend: number
+  logisticsCost: number
+  logisticsOrders: number
+  logisticsCurrency: string
   disbursements: number
   other: number
   ledgerNetChangeExcludingDisbursement: number
@@ -190,6 +195,7 @@ export interface FinanceTrendItem {
   etsyFees: number
   taxes: number
   adSpend: number
+  logisticsCost: number
   estimatedProfitExcludingLogistics: number
   orders: number
 }
@@ -212,7 +218,28 @@ export interface FinanceOrderRow {
   ledgerSalesTax: number
   ledgerNetEstimate: number
   logisticsCost: number | null
+  logisticsMatched: boolean
   logisticsStatus: string
+  logisticsUnitPrice: number
+  logisticsTotalAmount: number
+  logisticsCurrency: string
+  logisticsWeight: number
+  logisticsTrackingNo: string
+  logisticsReceivedAt: string
+}
+
+export interface FinanceLogisticsRow {
+  logisticsKey: string
+  orderNo: string
+  trackingNo: string
+  receivedAt: string
+  date: string
+  shippingMethod: string
+  country: string
+  weight: number
+  unitPrice: number
+  totalAmount: number
+  currency: string
 }
 
 export interface FinanceLedgerRow {
@@ -250,6 +277,7 @@ export interface FinancePeriodData {
   summary: FinanceSummary
   trends: FinanceTrendItem[]
   orderRows: FinanceOrderRow[]
+  logisticsRows: FinanceLogisticsRow[]
   ledgerRows: FinanceLedgerRow[]
   feeBreakdown: FinanceBreakdownItem[]
 }
@@ -283,8 +311,23 @@ export interface FulfillmentOrder {
   isDueSoon: boolean
   daysUntilDue: number | null
   productSummary: string
+  productImageUrl: string
+  productItems: {
+    listingId: string
+    title: string
+    quantity: number
+    imageUrl: string
+    listingUrl: string
+  }[]
   itemCount: number
   total: number
+  logisticsMatched: boolean
+  logisticsUnitPrice: number
+  logisticsTotalAmount: number
+  logisticsCurrency: string
+  logisticsWeight: number
+  logisticsReceivedAt: string
+  logisticsTrackingNo: string
 }
 
 export interface FulfillmentStatus {
@@ -295,7 +338,10 @@ export interface FulfillmentStatus {
   dueSoon: number
   overdue: number
   shipped: number
+  unpaid: number
+  canceled: number
   items: FulfillmentOrder[]
+  orders: FulfillmentOrder[]
 }
 
 export interface AdReportRow {

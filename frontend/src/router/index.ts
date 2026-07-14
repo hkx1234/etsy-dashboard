@@ -7,6 +7,7 @@ import Finance from '@/pages/Finance.vue'
 import Inventory from '@/pages/Inventory.vue'
 import InternalFeedback from '@/pages/InternalFeedback.vue'
 import Login from '@/pages/Login.vue'
+import Orders from '@/pages/Orders.vue'
 import Permissions from '@/pages/Permissions.vue'
 import Products from '@/pages/Analysis.vue'
 import Reviews from '@/pages/Reviews.vue'
@@ -67,6 +68,12 @@ const router = createRouter({
           name: 'inventory',
           component: Inventory,
           meta: { title: '库存看板', allowedRoles: ['owner', 'admin', 'operator'] },
+        },
+        {
+          path: 'orders',
+          name: 'orders',
+          component: Orders,
+          meta: { title: '订单状态', allowedRoles: ['owner', 'admin', 'operator'] },
         },
         {
           path: 'traffic',

@@ -1,14 +1,20 @@
-require('dotenv').config()
+// The deployed .env is bind-mounted into /app. Prefer it over stale values
+// captured when an older container was created so configuration fixes take
+// effect on a normal restart without replacing the persistent-data container.
+require('dotenv').config({ override: true })
 
 const crypto = require('crypto')
 const fs = require('fs/promises')
 const path = require('path')
 const express = require('express')
 const mysql = require('mysql2/promise')
+const { ProxyAgent } = require('undici')
 
 const app = express()
 
-const PORT = process.env.PORT || 3000
+// Keep the dashboard backend separate from the legacy service on port 8000.
+// BACKEND_PORT remains available for an intentional deployment override.
+const PORT = Number(process.env.BACKEND_PORT || 3001)
 const ETSY_AUTH_URL = 'https://www.etsy.com/oauth/connect'
 const ETSY_TOKEN_URL = 'https://api.etsy.com/v3/public/oauth/token'
 const ETSY_API_BASE = 'https://api.etsy.com/v3/application'
@@ -16,8 +22,12 @@ const SCOPES = ['shops_r', 'listings_r', 'transactions_r', 'feedback_r']
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_AD_REPORT_DIR = '/Volumes/汇总/广告报表'
+const RUNTIME_DATA_DIR = path.resolve(process.env.RUNTIME_DATA_DIR || path.join(__dirname, 'data'))
 const DASHBOARD_TIME_ZONE = process.env.DASHBOARD_TIME_ZONE || 'Asia/Shanghai'
 const DASHBOARD_CACHE_TTL_MS = Number(process.env.DASHBOARD_CACHE_TTL_MS || 5 * 60 * 1000)
+const DEFAULT_LOGISTICS_FEES_API_URL = 'https://kaixue.app.n8n.cloud/webhook/logistics-fees/latest'
+const ETSY_PROXY_URL = String(process.env.ETSY_PROXY_URL || '').trim()
+const etsyProxyDispatcher = ETSY_PROXY_URL ? new ProxyAgent(ETSY_PROXY_URL) : null
 const AUTH_CONFIG_FILE = 'auth-config.json'
 const AUTH_USERS_FILE = 'auth-users.json'
 const AUTH_TOKEN_TTL_MS = 12 * 60 * 60 * 1000
@@ -44,6 +54,7 @@ const financeCache = new Map()
 const financeBuilds = new Map()
 let authPool = null
 let authDbReady = null
+let etsyTokenRefresh = null
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -81,9 +92,10 @@ function assertEnv() {
 }
 
 function dataPath(fileName) {
-  if (fileName.startsWith('etsy-')) return path.join(__dirname, 'data', 'etsy', fileName)
-  if (fileName.startsWith('hualei-')) return path.join(__dirname, 'data', 'hualei', fileName)
-  if (fileName.startsWith('auth-')) return path.join(__dirname, 'data', 'auth', fileName)
+  if (fileName.startsWith('etsy-')) return path.join(RUNTIME_DATA_DIR, 'etsy', fileName)
+  if (fileName.startsWith('hualei-')) return path.join(RUNTIME_DATA_DIR, 'hualei', fileName)
+  if (fileName.startsWith('logistics-')) return path.join(RUNTIME_DATA_DIR, 'logistics', fileName)
+  if (fileName.startsWith('auth-')) return path.join(RUNTIME_DATA_DIR, 'auth', fileName)
   return path.join(__dirname, fileName)
 }
 
@@ -1184,6 +1196,7 @@ async function requestToken(params) {
     response = await fetch(ETSY_TOKEN_URL, {
       method: 'POST',
       signal: controller.signal,
+      ...(etsyProxyDispatcher ? { dispatcher: etsyProxyDispatcher } : {}),
       headers: {
         'content-type': 'application/x-www-form-urlencoded; charset=utf-8',
         accept: 'application/json',
@@ -1237,7 +1250,15 @@ async function getValidAccessToken(forceRefresh = false) {
     return token.access_token
   }
 
-  const refreshedToken = await refreshAccessToken(token)
+  // Dashboard requests listings, receipts and transactions concurrently. Etsy may
+  // rotate refresh tokens, so only one request may refresh a given token at a time.
+  if (!etsyTokenRefresh) {
+    etsyTokenRefresh = refreshAccessToken(token).finally(() => {
+      etsyTokenRefresh = null
+    })
+  }
+
+  const refreshedToken = await etsyTokenRefresh
   return refreshedToken.access_token
 }
 
@@ -1259,6 +1280,7 @@ async function etsyFetch(apiPath, options = {}) {
       return await fetch(url, {
         ...fetchOptions,
         signal: controller.signal,
+        ...(etsyProxyDispatcher ? { dispatcher: etsyProxyDispatcher } : {}),
         headers: {
           accept: 'application/json',
           'x-api-key': `${keystring}:${sharedSecret}`,
@@ -1677,6 +1699,231 @@ function aggregateAds(adRows, start, end) {
     cpc: clicks > 0 ? Number((spend / clicks).toFixed(2)) : 0,
     acos: revenue > 0 ? Number(((spend / revenue) * 100).toFixed(1)) : 0,
     endingBudget: Number(latestBudget || 0),
+  }
+}
+
+function logisticsFeesApiUrl() {
+  return String(process.env.LOGISTICS_FEES_API_URL || DEFAULT_LOGISTICS_FEES_API_URL).trim()
+}
+
+function logisticsFeesApiHeaders() {
+  const token = String(process.env.LOGISTICS_FEES_API_TOKEN || '').trim()
+  if (!token) return {}
+  const headerName = String(process.env.LOGISTICS_FEES_API_HEADER_NAME || 'x-dashboard-token').trim()
+  return { [headerName]: token }
+}
+
+function cnyMoneyText(value, currency = 'CNY') {
+  const amount = Number(value || 0).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return currency === 'CNY' ? `¥${amount}` : `${currency} ${amount}`
+}
+
+function roundMoney(value) {
+  return Number(Number(value || 0).toFixed(2))
+}
+
+function normalizeOrderNo(value) {
+  return String(value || '').trim().replace(/^#/, '')
+}
+
+function logisticsDateKey(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  const key = text.match(/^(\d{4}-\d{2}-\d{2})/)?.[1]
+  if (key) return key
+  const parsed = new Date(text)
+  return Number.isNaN(parsed.getTime()) ? '' : dateKeyInTimeZone(parsed)
+}
+
+function logisticsUnitPrice(item, totalAmount, weight) {
+  const directUnitPrice = parseNumber(
+    item.unitPrice ??
+    item.unit_price ??
+    item.orderpricetrial_unitprice ??
+    item.orderpricetrial_unit_price ??
+    item.price ??
+    item.unitAmount ??
+    item.unit_amount ??
+    item['单价'],
+  )
+  if (directUnitPrice > 0) return roundMoney(directUnitPrice)
+  if (totalAmount > 0 && weight > 0) return roundMoney(totalAmount / weight)
+  return 0
+}
+
+function normalizeLogisticsFeeItems(payload) {
+  const rawItems = Array.isArray(payload?.items)
+    ? payload.items
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Object.values(payload?.itemsByOrderNo || {})
+  const defaultCurrency = payload?.summary?.currency || 'CNY'
+
+  return rawItems
+    .map((item) => {
+      const receivedAt = item.receivedAt || item.received_at || item.receiveTime || item.date || ''
+      const orderNo = normalizeOrderNo(item.orderNo || item.orderId || item.order_id || item.order_customerinvoicecode)
+      const totalAmount = parseNumber(item.totalAmount ?? item.total_amount ?? item.orderpricetrial_amount ?? item.amount)
+      const weight = parseNumber(item.weight ?? item.chargeWeight ?? item.charge_weight)
+
+      return {
+        orderNo,
+        trackingNo: item.trackingNo || item.tracking_no || item.order_serviceinvoicecode || '',
+        receivedAt,
+        date: logisticsDateKey(receivedAt),
+        shippingMethod: item.shippingMethod || item.shipping_method || item.express_type || '',
+        country: item.country || '',
+        weight,
+        freight: parseNumber(item.freight ?? item.freightAmount ?? item.shippingFee),
+        fuel: parseNumber(item.fuel ?? item.fuelFee),
+        misc: parseNumber(item.misc ?? item.miscFee ?? item.otherFee),
+        totalAmount: roundMoney(totalAmount),
+        unitPrice: logisticsUnitPrice(item, totalAmount, weight),
+        pieces: Number(item.pieces || item.quantity || item.count || 1),
+        currency: item.currency || item.orderpricetrial_currency || defaultCurrency,
+        paid: typeof item.paid === 'boolean' ? item.paid : null,
+      }
+    })
+    .filter((item) => item.orderNo || item.date || item.totalAmount)
+}
+
+function buildLogisticsFeeByOrderNo(rows) {
+  const map = new Map()
+
+  for (const row of rows) {
+    const orderNo = normalizeOrderNo(row.orderNo)
+    if (!orderNo) continue
+
+    if (!map.has(orderNo)) {
+      map.set(orderNo, {
+        orderNo,
+        trackingNo: row.trackingNo || '',
+        trackingNos: row.trackingNo ? [row.trackingNo] : [],
+        receivedAt: row.receivedAt || '',
+        date: row.date || '',
+        shippingMethod: row.shippingMethod || '',
+        country: row.country || '',
+        weight: 0,
+        freight: 0,
+        fuel: 0,
+        misc: 0,
+        totalAmount: 0,
+        unitPrice: 0,
+        pieces: 0,
+        currency: row.currency || 'CNY',
+        paid: row.paid,
+        rowCount: 0,
+      })
+    }
+
+    const item = map.get(orderNo)
+    item.weight += Number(row.weight || 0)
+    item.freight += Number(row.freight || 0)
+    item.fuel += Number(row.fuel || 0)
+    item.misc += Number(row.misc || 0)
+    item.totalAmount += Number(row.totalAmount || 0)
+    item.pieces += Number(row.pieces || 0)
+    item.rowCount += 1
+    if (!item.unitPrice && row.unitPrice) item.unitPrice = Number(row.unitPrice || 0)
+    if (row.trackingNo && !item.trackingNos.includes(row.trackingNo)) item.trackingNos.push(row.trackingNo)
+    if (!item.trackingNo && row.trackingNo) item.trackingNo = row.trackingNo
+    if (!item.receivedAt && row.receivedAt) item.receivedAt = row.receivedAt
+    if (!item.date && row.date) item.date = row.date
+    if (!item.shippingMethod && row.shippingMethod) item.shippingMethod = row.shippingMethod
+    if (!item.country && row.country) item.country = row.country
+    if (!item.currency && row.currency) item.currency = row.currency
+    if (item.paid == null && row.paid != null) item.paid = row.paid
+  }
+
+  for (const item of map.values()) {
+    item.weight = Number(item.weight.toFixed(3))
+    item.freight = roundMoney(item.freight)
+    item.fuel = roundMoney(item.fuel)
+    item.misc = roundMoney(item.misc)
+    item.totalAmount = roundMoney(item.totalAmount)
+    item.unitPrice = item.weight > 0 ? roundMoney(item.totalAmount / item.weight) : roundMoney(item.unitPrice)
+    item.pieces = item.pieces || item.rowCount
+  }
+
+  return map
+}
+
+async function fetchLogisticsFeeData() {
+  const sourceUrl = logisticsFeesApiUrl()
+  if (!sourceUrl) {
+    return {
+      status: 'missing',
+      sourceUrl: '',
+      updatedAt: '',
+      rows: [],
+      message: '物流费用接口未配置。',
+    }
+  }
+
+  try {
+    const response = await fetch(sourceUrl, { headers: logisticsFeesApiHeaders() })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+    const payload = await response.json()
+    const rows = normalizeLogisticsFeeItems(payload)
+    const totalAmount = rows.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)
+    const currency = payload?.summary?.currency || rows.find((row) => row.currency)?.currency || 'CNY'
+    const normalized = {
+      status: 'synced',
+      sourceUrl,
+      updatedAt: payload?.updatedAt || new Date().toISOString(),
+      rows,
+      summary: {
+        count: rows.length,
+        totalAmount: Number(totalAmount.toFixed(2)),
+        currency,
+      },
+      message: `已同步物流费用：${numberText(rows.length)} 单，${cnyMoneyText(totalAmount, currency)}`,
+    }
+
+    await writeJson('logistics-fees.json', normalized)
+    return normalized
+  } catch (error) {
+    const cached = await readOptionalJson('logistics-fees.json', null)
+    if (cached) {
+      return {
+        ...cached,
+        status: 'cached',
+        message: `物流费用本次读取失败，已使用上次缓存：${error.message}`,
+      }
+    }
+
+    return {
+      status: 'error',
+      sourceUrl,
+      updatedAt: '',
+      rows: [],
+      message: `物流费用读取失败：${error.message}`,
+    }
+  }
+}
+
+function logisticsRowDateMs(row) {
+  return parseDateKey(row.date, new Date(0)).getTime()
+}
+
+function aggregateLogisticsFees(rows, start, end) {
+  const inPeriod = rows.filter((row) => {
+    const rowTime = logisticsRowDateMs(row)
+    return rowTime >= start.getTime() && rowTime < end.getTime()
+  })
+  const totalAmount = inPeriod.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)
+  const orderNos = new Set(inPeriod.map((row) => row.orderNo).filter(Boolean))
+  const currency = inPeriod.find((row) => row.currency)?.currency || rows.find((row) => row.currency)?.currency || 'CNY'
+
+  return {
+    rows: inPeriod.length,
+    orders: orderNos.size || inPeriod.length,
+    totalAmount: Number(totalAmount.toFixed(2)),
+    currency,
   }
 }
 
@@ -2379,10 +2626,12 @@ async function recordListingSnapshot(listings, imageMap) {
   }
 }
 
-function buildFulfillmentStatus(receipts, transactions) {
+function buildFulfillmentStatus(receipts, transactions, listings = [], imageMap = {}, logisticsRows = []) {
   const todayKey = dateKeyInTimeZone(new Date())
   const todayDayNumber = dateKeyDayNumber(todayKey)
   const transactionsByReceipt = new Map()
+  const listingMap = new Map(listings.map((listing) => [String(listing.listing_id || ''), listing]))
+  const logisticsFeeByOrderNo = buildLogisticsFeeByOrderNo(logisticsRows)
 
   for (const transaction of transactions) {
     const receiptId = String(transaction.receipt_id || '')
@@ -2401,13 +2650,27 @@ function buildFulfillmentStatus(receipts, transactions) {
     const expectedShipDate = expectedShipMs ? dateKeyInTimeZone(new Date(expectedShipMs)) : ''
     const orderMs = timestampMs(receipt)
     const itemCount = receiptTransactions.reduce((sum, transaction) => sum + Number(transaction.quantity || 1), 0) || receiptTransactions.length || 1
-    const productNames = receiptTransactions
-      .map((transaction) => transaction.title)
-      .filter(Boolean)
+    const productItems = receiptTransactions
+      .map((transaction) => {
+        const listingId = String(transaction.listing_id || '')
+        const listing = listingMap.get(listingId) || {}
+        const title = transaction.title || listing.title || (listingId ? `Listing ${listingId}` : '')
+
+        return {
+          listingId,
+          title,
+          quantity: Number(transaction.quantity || 1),
+          imageUrl: listingId ? imageMap[listingId] || '' : '',
+          listingUrl: listing.url || (listingId ? `https://www.etsy.com/listing/${listingId}` : ''),
+        }
+      })
+      .filter((item) => item.title || item.listingId)
+    const productNames = productItems.map((item) => item.title).filter(Boolean)
     const productSummary =
       productNames.length > 1
         ? `${productNames[0]} 等 ${numberText(productNames.length)} 个商品`
         : productNames[0] || `Receipt ${receiptId}`
+    const productImageUrl = productItems.find((item) => item.imageUrl)?.imageUrl || ''
     const daysUntilDue = expectedShipDate ? dateKeyDayNumber(expectedShipDate) - todayDayNumber : null
     const statusText = String(receipt.status || '').toLowerCase()
     const isCanceled = statusText.includes('cancel')
@@ -2423,6 +2686,7 @@ function buildFulfillmentStatus(receipts, transactions) {
       : isShipped
         ? '已发货'
         : '待发货'
+    const logisticsFee = logisticsFeeByOrderNo.get(normalizeOrderNo(receiptId)) || null
 
     return {
       receiptId,
@@ -2438,8 +2702,17 @@ function buildFulfillmentStatus(receipts, transactions) {
       isDueSoon,
       daysUntilDue,
       productSummary,
+      productImageUrl,
+      productItems,
       itemCount,
       total: Number(receiptRevenue(receipt).toFixed(2)),
+      logisticsMatched: Boolean(logisticsFee),
+      logisticsUnitPrice: logisticsFee?.unitPrice || 0,
+      logisticsTotalAmount: logisticsFee?.totalAmount || 0,
+      logisticsCurrency: logisticsFee?.currency || 'CNY',
+      logisticsWeight: logisticsFee?.weight || 0,
+      logisticsReceivedAt: logisticsFee?.receivedAt || '',
+      logisticsTrackingNo: logisticsFee?.trackingNo || '',
     }
   })
 
@@ -2456,6 +2729,10 @@ function buildFulfillmentStatus(receipts, transactions) {
     })
 
   const activeOrders = orders.filter((order) => !order.isCanceled)
+  const sortedOrders = [...orders].sort((a, b) => {
+    if (a.orderDate !== b.orderDate) return b.orderDate.localeCompare(a.orderDate)
+    return String(b.receiptId).localeCompare(String(a.receiptId))
+  })
 
   return {
     currentDate: todayKey,
@@ -2465,13 +2742,17 @@ function buildFulfillmentStatus(receipts, transactions) {
     dueSoon: pendingItems.filter((order) => order.isDueSoon).length,
     overdue: pendingItems.filter((order) => order.isOverdue).length,
     shipped: activeOrders.filter((order) => order.isShipped).length,
+    unpaid: activeOrders.filter((order) => !order.isPaid).length,
+    canceled: orders.filter((order) => order.isCanceled).length,
     items: pendingItems,
+    orders: sortedOrders,
   }
 }
 
-function buildTrendItem(label, listings, receipts, adRows, start, end) {
+function buildTrendItem(label, listings, receipts, adRows, logisticsRows, start, end) {
   const receiptMetrics = aggregateReceipts(receipts, start, end)
   const adMetrics = aggregateAds(adRows, start, end)
+  const logisticsMetrics = aggregateLogisticsFees(logisticsRows, start, end)
   const endInclusive = addDays(end, -1)
 
   return {
@@ -2487,31 +2768,33 @@ function buildTrendItem(label, listings, receipts, adRows, start, end) {
     adOrders: adMetrics.orders,
     roas: adMetrics.roas,
     clickRate: adMetrics.clickRate,
+    logisticsCost: logisticsMetrics.totalAmount,
+    logisticsOrders: logisticsMetrics.orders,
     favorites: sumListingFavorites(listings),
     conversations: 0,
   }
 }
 
-function buildDayTrends(listings, receipts, adRows, endDate) {
+function buildDayTrends(listings, receipts, adRows, logisticsRows, endDate) {
   return Array.from({ length: 7 }, (_, index) => {
     const start = addDays(endDate, index - 6)
-    const item = buildTrendItem(shortDateLabel(start), listings, receipts, adRows, start, addDays(start, 1))
+    const item = buildTrendItem(shortDateLabel(start), listings, receipts, adRows, logisticsRows, start, addDays(start, 1))
     item.rangeLabel = dateKey(start)
     return item
   })
 }
 
-function buildWeekTrends(listings, receipts, adRows, endDate) {
+function buildWeekTrends(listings, receipts, adRows, logisticsRows, endDate) {
   return Array.from({ length: 5 }, (_, index) => {
     const start = addDays(endDate, (index - 4) * 7 - 6)
-    return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, start, addDays(start, 7))
+    return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, logisticsRows, start, addDays(start, 7))
   })
 }
 
-function buildMonthTrends(listings, receipts, adRows, endDate) {
+function buildMonthTrends(listings, receipts, adRows, logisticsRows, endDate) {
   return Array.from({ length: 6 }, (_, index) => {
     const start = addDays(endDate, (index - 5) * 30 - 29)
-    return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, start, addDays(start, 30))
+    return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, logisticsRows, start, addDays(start, 30))
   })
 }
 
@@ -2519,9 +2802,10 @@ function metric(key, title, value, note, tone) {
   return { key, title, value, note, tone }
 }
 
-function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipts, transactions, imageMap, adRows, start, end, trends }) {
+function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipts, transactions, imageMap, adRows, logisticsRows, start, end, trends }) {
   const receiptMetrics = aggregateReceipts(receipts, start, end)
   const adMetrics = aggregateAds(adRows, start, end)
+  const logisticsMetrics = aggregateLogisticsFees(logisticsRows, start, end)
   const products = buildProductPerformance(transactions, listings, imageMap, start, end)
   const bestProduct = products[0]
   const favorites = sumListingFavorites(listings)
@@ -2545,7 +2829,7 @@ function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipt
       eyebrow: 'Etsy Open API v3',
       title,
       rangeLabel,
-      summary: `${periodName}上架 ${numberText(newListings)} 个产品，出了 ${numberText(receiptMetrics.orders)} 单，广告花费 ${moneyText(adMetrics.spend)}，广告销售额 ${moneyText(adMetrics.revenue)}，商品收藏 ${numberText(favorites)}。客户咨询暂未接入。`,
+      summary: `${periodName}上架 ${numberText(newListings)} 个产品，出了 ${numberText(receiptMetrics.orders)} 单，广告花费 ${moneyText(adMetrics.spend)}，广告销售额 ${moneyText(adMetrics.revenue)}，物流费用 ${cnyMoneyText(logisticsMetrics.totalAmount, logisticsMetrics.currency)}，商品收藏 ${numberText(favorites)}。`,
       bestProductLabel: bestProductTitle,
       bestProduct: bestProduct?.productName || '暂无订单商品',
       bestProductNote: bestProduct
@@ -2560,7 +2844,7 @@ function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipt
         metric('adSpend', '广告花费', moneyText(adMetrics.spend), `站内广告点击 ${numberText(adMetrics.clicks)} 次 / CPC ${moneyText(adMetrics.cpc)}`, 'amber'),
         metric('adRevenue', '广告销售额', moneyText(adMetrics.revenue), `广告订单 ${numberText(adMetrics.orders)} 单 / ROAS ${adMetrics.roas.toFixed(2)}`, 'blue'),
         metric('favorites', '商品收藏数', numberText(favorites), '来自 active listings 当前收藏数', 'red'),
-        metric('conversations', '客户咨询', '未接入', 'Etsy conversations API 暂未接入', 'amber'),
+        metric('logistics', '物流费用', cnyMoneyText(logisticsMetrics.totalAmount, logisticsMetrics.currency), `${numberText(logisticsMetrics.orders)} 单 / 来自 n8n 物流表`, 'amber'),
         metric('best', bestProductTitle, bestProduct ? bestProduct.productName.slice(0, 24) : '暂无', bestProduct?.note || '暂无交易', 'blue'),
       ],
       trends,
@@ -2671,6 +2955,8 @@ async function buildDashboardData(endDateValue) {
   const { listings, receipts, transactions, syncSource, cacheReasons } = await fetchDashboardSourceData()
   const adReport = await fetchAdReportData()
   const adRows = adReport.rows || []
+  const logisticsReport = await fetchLogisticsFeeData()
+  const logisticsRows = logisticsReport.rows || []
   const imageMap = await getListingImageMap(listings)
   let listingSnapshot = null
   try {
@@ -2678,15 +2964,16 @@ async function buildDashboardData(endDateValue) {
   } catch (error) {
     console.warn('[listing snapshot error]', error.message)
   }
-  const fulfillment = buildFulfillmentStatus(receipts, transactions)
+  const fulfillment = buildFulfillmentStatus(receipts, transactions, listings, imageMap, logisticsRows)
   const receiptDates = receipts
     .map((receipt) => timestampMs(receipt))
     .filter(Boolean)
     .map((ms) => dateKey(startOfDay(new Date(ms))))
     .sort()
   const adDates = adRows.map((row) => row.date).filter(Boolean).sort()
+  const logisticsDates = logisticsRows.map((row) => row.date).filter(Boolean).sort()
   const todayKey = dateKeyInTimeZone(new Date())
-  const availableDates = [...new Set([...receiptDates, ...adDates, todayKey])].sort()
+  const availableDates = [...new Set([...receiptDates, ...adDates, ...logisticsDates, todayKey])].sort()
   const latestDate = availableDates.at(-1) || todayKey
   const selectedDate = dateKey(parseDateKey(endDateValue, parseDateKey(latestDate, startOfDay(new Date()))))
   const endDate = parseDateKey(selectedDate, startOfDay(new Date()))
@@ -2705,9 +2992,10 @@ async function buildDashboardData(endDateValue) {
     transactions,
     imageMap,
     adRows,
+    logisticsRows,
     start: dayStart,
     end: addDays(dayStart, 1),
-    trends: buildDayTrends(listings, receipts, adRows, endDate),
+    trends: buildDayTrends(listings, receipts, adRows, logisticsRows, endDate),
   })
   const week = buildPeriodDashboard({
     key: 'week',
@@ -2719,9 +3007,10 @@ async function buildDashboardData(endDateValue) {
     transactions,
     imageMap,
     adRows,
+    logisticsRows,
     start: weekStart,
     end: addDays(weekStart, 7),
-    trends: buildWeekTrends(listings, receipts, adRows, endDate),
+    trends: buildWeekTrends(listings, receipts, adRows, logisticsRows, endDate),
   })
   const month = buildPeriodDashboard({
     key: 'month',
@@ -2733,13 +3022,17 @@ async function buildDashboardData(endDateValue) {
     transactions,
     imageMap,
     adRows,
+    logisticsRows,
     start: monthStart,
     end: addDays(endDate, 1),
-    trends: buildMonthTrends(listings, receipts, adRows, endDate),
+    trends: buildMonthTrends(listings, receipts, adRows, logisticsRows, endDate),
   })
   const adDay = aggregateAds(adRows, dayStart, addDays(dayStart, 1))
   const adWeek = aggregateAds(adRows, weekStart, addDays(weekStart, 7))
   const adMonth = aggregateAds(adRows, monthStart, addDays(endDate, 1))
+  const logisticsDay = aggregateLogisticsFees(logisticsRows, dayStart, addDays(dayStart, 1))
+  const logisticsWeek = aggregateLogisticsFees(logisticsRows, weekStart, addDays(weekStart, 7))
+  const logisticsMonth = aggregateLogisticsFees(logisticsRows, monthStart, addDays(endDate, 1))
   const isSetupMissing = syncSource === 'setup-missing'
   const syncStatus = isSetupMissing ? 'cached' : syncSource === 'cache' ? 'cached' : 'synced'
   const syncLatestFile = isSetupMissing
@@ -2750,8 +3043,8 @@ async function buildDashboardData(endDateValue) {
   const syncMessage = isSetupMissing
     ? '当前展示备用数据；完成 Etsy 授权后刷新即可同步真实数据。'
     : syncSource === 'cache'
-      ? `Etsy API 本次同步受限，已使用上次 API 缓存：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}。${cacheReasons[0] || ''}`
-      : `已同步 Etsy API：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}`
+      ? `Etsy API 本次同步受限，已使用上次 API 缓存：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}；${logisticsReport.message}。${cacheReasons[0] || ''}`
+      : `已同步 Etsy API：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}；${logisticsReport.message}`
 
   return {
     ok: true,
@@ -2767,6 +3060,7 @@ async function buildDashboardData(endDateValue) {
       { date: latestDate, name: 'etsy-listing-images.json', path: dataPath('etsy-listing-images.json') },
       { date: listingSnapshot?.date || latestDate, name: 'etsy-listing-snapshots.json', path: dataPath('etsy-listing-snapshots.json') },
       { date: adDates.at(-1) || latestDate, name: adReport.sourceFile || 'etsy-ads.json', path: adReport.sourcePath || dataPath('etsy-ads.json') },
+      { date: logisticsDates.at(-1) || latestDate, name: 'logistics-fees.json', path: dataPath('logistics-fees.json') },
     ],
     periods: {
       day: day.period,
@@ -2794,15 +3088,22 @@ async function buildDashboardData(endDateValue) {
         month: adMonth,
       },
     },
+    logistics: {
+      status: logisticsReport.status,
+      message: logisticsReport.message,
+      sourceUrl: logisticsReport.sourceUrl,
+      updatedAt: logisticsReport.updatedAt,
+      latestDate: logisticsDates.at(-1) || '',
+      rows: logisticsRows,
+      periods: {
+        day: logisticsDay,
+        week: logisticsWeek,
+        month: logisticsMonth,
+      },
+    },
     sync: {
       status: syncSource === 'setup-missing' ? 'cached' : syncSource === 'cache' ? 'cached' : 'synced',
-      fileCount: adRows.length > 0 ? 6 : 5,
-      latestFile: syncSource === 'cache' ? 'Etsy Open API v3 本地缓存' : 'Etsy Open API v3 + 广告报表',
-      message:
-        syncSource === 'cache'
-          ? `Etsy API 本次同步受限，已使用上次 API 缓存：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}。${cacheReasons[0] || ''}`
-          : `已同步 Etsy API：${numberText(listings.length)} 个商品，${numberText(receipts.length)} 个订单，${numberText(transactions.length)} 条交易；${adReport.message}`,
-      fileCount: isSetupMissing ? 0 : adRows.length > 0 ? 6 : 5,
+      fileCount: isSetupMissing ? 0 : adRows.length > 0 ? 7 : 6,
       latestFile: syncLatestFile,
       message: syncMessage,
     },
@@ -2937,9 +3238,10 @@ function financeRowsInRange(rows, start, end) {
   })
 }
 
-function summarizeFinanceLedger(ledgerRows, adRows, start, end) {
+function summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end) {
   const rows = financeRowsInRange(ledgerRows, start, end)
   const adMetrics = aggregateAds(adRows, start, end)
+  const logisticsMetrics = aggregateLogisticsFees(logisticsRows, start, end)
   const totals = {
     orderGross: 0,
     paymentFees: 0,
@@ -2948,6 +3250,9 @@ function summarizeFinanceLedger(ledgerRows, adRows, start, end) {
     taxes: 0,
     ledgerAdSpend: 0,
     adSpend: Number(adMetrics.spend || 0),
+    logisticsCost: logisticsMetrics.totalAmount,
+    logisticsOrders: logisticsMetrics.orders,
+    logisticsCurrency: logisticsMetrics.currency,
     disbursements: 0,
     other: 0,
     ledgerNetChangeExcludingDisbursement: 0,
@@ -2997,12 +3302,12 @@ function buildFinanceMetric(key, title, value, note, tone = 'blue') {
   return { key, title, value, note, tone }
 }
 
-function buildFinanceTrend(ledgerRows, adRows, start, end) {
+function buildFinanceTrend(ledgerRows, adRows, logisticsRows, start, end) {
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS))
   return Array.from({ length: days }, (_, index) => {
     const dayStart = addDays(start, index)
     const dayEnd = addDays(dayStart, 1)
-    const summary = summarizeFinanceLedger(ledgerRows, adRows, dayStart, dayEnd)
+    const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, dayStart, dayEnd)
     return {
       label: shortDateLabel(dayStart),
       rangeLabel: dateKey(dayStart),
@@ -3010,6 +3315,7 @@ function buildFinanceTrend(ledgerRows, adRows, start, end) {
       etsyFees: summary.etsyFees,
       taxes: summary.taxes,
       adSpend: summary.adSpend,
+      logisticsCost: summary.logisticsCost,
       estimatedProfitExcludingLogistics: summary.estimatedProfitExcludingLogistics,
       orders: summary.orders,
     }
@@ -3052,6 +3358,28 @@ function normalizeFinanceLedgerRows(ledgerRows) {
     .sort((a, b) => b.date.localeCompare(a.date) || Number(b.entryId) - Number(a.entryId))
 }
 
+function normalizeFinanceLogisticsRows(logisticsRows, start, end) {
+  return logisticsRows
+    .filter((row) => {
+      const rowTime = logisticsRowDateMs(row)
+      return rowTime >= start.getTime() && rowTime < end.getTime()
+    })
+    .map((row, index) => ({
+      logisticsKey: `${row.orderNo || 'unknown'}-${row.trackingNo || index}`,
+      orderNo: normalizeOrderNo(row.orderNo),
+      trackingNo: row.trackingNo || '',
+      receivedAt: row.receivedAt || '',
+      date: row.date || '',
+      shippingMethod: row.shippingMethod || '',
+      country: row.country || '',
+      weight: Number(row.weight || 0),
+      unitPrice: Number(row.unitPrice || 0),
+      totalAmount: Number(row.totalAmount || 0),
+      currency: row.currency || 'CNY',
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date) || b.orderNo.localeCompare(a.orderNo))
+}
+
 function buildLedgerLookup(ledgerRows) {
   const byPaymentId = new Map()
   const taxByReceiptId = new Map()
@@ -3074,8 +3402,9 @@ function buildLedgerLookup(ledgerRows) {
   return { byPaymentId, taxByReceiptId }
 }
 
-function normalizeFinanceOrderRows(payments, ledgerRows, start, end) {
+function normalizeFinanceOrderRows(payments, ledgerRows, logisticsRows, start, end) {
   const { byPaymentId, taxByReceiptId } = buildLedgerLookup(ledgerRows)
+  const logisticsFeeByOrderNo = buildLogisticsFeeByOrderNo(logisticsRows)
   const periodPayments = payments.filter((payment) => {
     const date = financePaymentDate(payment)
     if (!date) return false
@@ -3100,6 +3429,7 @@ function normalizeFinanceOrderRows(payments, ledgerRows, start, end) {
       const fees = financeMoneyNumber(payment.amount_fees)
       const net = financeMoneyNumber(payment.amount_net)
       const buyerCurrency = financeMoneyCurrency(payment.amount_gross, payment.buyer_currency || '')
+      const logisticsFee = logisticsFeeByOrderNo.get(normalizeOrderNo(receiptId)) || null
 
       return {
         paymentId,
@@ -3118,8 +3448,15 @@ function normalizeFinanceOrderRows(payments, ledgerRows, start, end) {
         ledgerProcessingFees: Number(ledgerProcessingFees.toFixed(2)),
         ledgerSalesTax: Number(taxes.toFixed(2)),
         ledgerNetEstimate: Number((ledgerGross - ledgerProcessingFees - taxes).toFixed(2)),
-        logisticsCost: null,
-        logisticsStatus: '待接入',
+        logisticsCost: logisticsFee?.totalAmount ?? null,
+        logisticsMatched: Boolean(logisticsFee),
+        logisticsStatus: logisticsFee ? '已匹配' : '未匹配',
+        logisticsUnitPrice: logisticsFee?.unitPrice || 0,
+        logisticsTotalAmount: logisticsFee?.totalAmount || 0,
+        logisticsCurrency: logisticsFee?.currency || 'CNY',
+        logisticsWeight: logisticsFee?.weight || 0,
+        logisticsTrackingNo: logisticsFee?.trackingNo || '',
+        logisticsReceivedAt: logisticsFee?.receivedAt || '',
       }
     })
     .sort((a, b) => b.date.localeCompare(a.date) || Number(b.receiptId) - Number(a.receiptId))
@@ -3202,10 +3539,11 @@ async function fetchFinanceSourceData(endDate) {
   }
 }
 
-function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payments, adRows, start, end }) {
-  const summary = summarizeFinanceLedger(ledgerRows, adRows, start, end)
-  const orderRows = normalizeFinanceOrderRows(payments, ledgerRows, start, end)
+function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payments, adRows, logisticsRows, start, end }) {
+  const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end)
+  const orderRows = normalizeFinanceOrderRows(payments, ledgerRows, logisticsRows, start, end)
   const periodLedgerRows = normalizeFinanceLedgerRows(financeRowsInRange(ledgerRows, start, end))
+  const periodLogisticsRows = normalizeFinanceLogisticsRows(logisticsRows, start, end)
   const currency = summary.currency || 'USD'
   const periodName = key === 'day' ? '单日' : key === 'week' ? '最近7天' : '最近30天'
   const metricCurrency = currency
@@ -3214,7 +3552,7 @@ function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payment
     buildFinanceMetric('etsyFees', 'Etsy 扣费', moneyText(summary.etsyFees), '支付/交易/上架/续费，不含广告 CSV', 'amber'),
     buildFinanceMetric('taxes', '销售税', moneyText(summary.taxes), 'Etsy 代收或相关税项', 'blue'),
     buildFinanceMetric('adSpend', '广告花费', moneyText(summary.adSpend), '来自站内广告 CSV', 'red'),
-    buildFinanceMetric('logistics', '物流费用', '待接入', '等待华磊费用明细 API 或导出表', 'amber'),
+    buildFinanceMetric('logistics', '物流费用', cnyMoneyText(summary.logisticsCost, summary.logisticsCurrency), `${numberText(summary.logisticsOrders)} 单 / 来自 n8n 物流表`, 'amber'),
     buildFinanceMetric('profit', '估算利润', moneyText(summary.estimatedProfitExcludingLogistics), '不含物流费和商品成本', 'green'),
   ]
 
@@ -3223,12 +3561,13 @@ function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payment
     label,
     title,
     rangeLabel,
-    summaryText: `${periodName}订单入账 ${moneyText(summary.orderGross)}，Etsy 扣费 ${moneyText(summary.etsyFees)}，广告花费 ${moneyText(summary.adSpend)}，估算利润 ${moneyText(summary.estimatedProfitExcludingLogistics)}。物流费用暂未接入。`,
+    summaryText: `${periodName}订单入账 ${moneyText(summary.orderGross)}，Etsy 扣费 ${moneyText(summary.etsyFees)}，广告花费 ${moneyText(summary.adSpend)}，物流费用 ${cnyMoneyText(summary.logisticsCost, summary.logisticsCurrency)}，估算利润 ${moneyText(summary.estimatedProfitExcludingLogistics)}。`,
     currency: metricCurrency,
     metrics,
     summary,
-    trends: buildFinanceTrend(ledgerRows, adRows, key === 'month' ? start : key === 'week' ? start : addDays(end, -7), end),
+    trends: buildFinanceTrend(ledgerRows, adRows, logisticsRows, key === 'month' ? start : key === 'week' ? start : addDays(end, -7), end),
     orderRows,
+    logisticsRows: periodLogisticsRows,
     ledgerRows: periodLedgerRows,
     feeBreakdown: buildFinanceBreakdown(summary),
   }
@@ -3241,10 +3580,13 @@ async function buildFinanceData(endDateValue) {
   const { shopId, ledgerRows, payments, syncSource, cacheReasons } = await fetchFinanceSourceData(endDate)
   const adReport = await fetchAdReportData()
   const adRows = adReport.rows || []
+  const logisticsReport = await fetchLogisticsFeeData()
+  const logisticsRows = logisticsReport.rows || []
   const ledgerDates = ledgerRows.map(financeLedgerDate).filter(Boolean).sort()
   const paymentDates = payments.map(financePaymentDate).filter(Boolean).sort()
   const adDates = adRows.map((row) => row.date).filter(Boolean).sort()
-  const availableDates = [...new Set([...ledgerDates, ...paymentDates, ...adDates, selectedDate])].sort()
+  const logisticsDates = logisticsRows.map((row) => row.date).filter(Boolean).sort()
+  const availableDates = [...new Set([...ledgerDates, ...paymentDates, ...adDates, ...logisticsDates, selectedDate])].sort()
   const latestDate = availableDates.at(-1) || selectedDate
   const dayStart = endDate
   const weekStart = addDays(endDate, -6)
@@ -3260,6 +3602,7 @@ async function buildFinanceData(endDateValue) {
     ledgerRows,
     payments,
     adRows,
+    logisticsRows,
     start: dayStart,
     end: dayEnd,
   })
@@ -3271,6 +3614,7 @@ async function buildFinanceData(endDateValue) {
     ledgerRows,
     payments,
     adRows,
+    logisticsRows,
     start: weekStart,
     end: weekEnd,
   })
@@ -3282,6 +3626,7 @@ async function buildFinanceData(endDateValue) {
     ledgerRows,
     payments,
     adRows,
+    logisticsRows,
     start: monthStart,
     end: monthEnd,
   })
@@ -3300,6 +3645,7 @@ async function buildFinanceData(endDateValue) {
       { date: selectedDate, name: 'etsy-ledger.json', path: dataPath('etsy-ledger.json') },
       { date: selectedDate, name: 'etsy-payments.json', path: dataPath('etsy-payments.json') },
       { date: adDates.at(-1) || selectedDate, name: adReport.sourceFile || 'etsy-ads.json', path: adReport.sourcePath || dataPath('etsy-ads.json') },
+      { date: logisticsDates.at(-1) || selectedDate, name: 'logistics-fees.json', path: dataPath('logistics-fees.json') },
     ],
     periods: {
       day,
@@ -3308,12 +3654,12 @@ async function buildFinanceData(endDateValue) {
     },
     sync: {
       status: syncSource === 'setup-missing' ? 'cached' : syncSource === 'cache' ? 'cached' : 'synced',
-      fileCount: syncSource === 'setup-missing' ? 0 : 3,
-      latestFile: syncSource === 'cache' ? 'Etsy 财务本地缓存' : 'Etsy Payments / Ledger + 广告报表',
+      fileCount: syncSource === 'setup-missing' ? 0 : 4,
+      latestFile: syncSource === 'cache' ? 'Etsy 财务本地缓存' : 'Etsy Payments / Ledger + 广告报表 + 物流费用',
       message:
         syncSource === 'cache'
-          ? `Etsy 财务 API 本次同步受限，已使用上次缓存：${numberText(ledgerRows.length)} 条流水，${numberText(payments.length)} 条 payment。${cacheReasons[0] || ''}`
-          : `已同步 Etsy 财务 API：${numberText(ledgerRows.length)} 条流水，${numberText(payments.length)} 条 payment；${adReport.message}`,
+          ? `Etsy 财务 API 本次同步受限，已使用上次缓存：${numberText(ledgerRows.length)} 条流水，${numberText(payments.length)} 条 payment；${logisticsReport.message}。${cacheReasons[0] || ''}`
+          : `已同步 Etsy 财务 API：${numberText(ledgerRows.length)} 条流水，${numberText(payments.length)} 条 payment；${adReport.message}；${logisticsReport.message}`,
     },
   }
 }
@@ -4082,8 +4428,7 @@ app.get('/etsy/test-shops', asyncRoute(async (req, res) => {
 
 app.get('/etsy/test-listings', asyncRoute(async (req, res) => {
   const shopId = await getSavedShopId()
-  const listings = await etsyFetch(`/shops/${shopId}/listings/active?limit=100&offset=0`)
-  await writeJson('etsy-listings.json', listings)
+  const listings = await etsyFetchAll(`/shops/${shopId}/listings/active`, 'etsy-listings.json')
 
   const rows = getResults(listings)
     .slice(0, 5)
@@ -4108,8 +4453,7 @@ app.get('/etsy/test-listings', asyncRoute(async (req, res) => {
 
 app.get('/etsy/test-receipts', asyncRoute(async (req, res) => {
   const shopId = await getSavedShopId()
-  const receipts = await etsyFetch(`/shops/${shopId}/receipts?limit=100&offset=0`)
-  await writeJson('etsy-receipts.json', receipts)
+  const receipts = await etsyFetchAll(`/shops/${shopId}/receipts`, 'etsy-receipts.json')
 
   const rows = getResults(receipts)
     .slice(0, 5)
@@ -4132,8 +4476,7 @@ app.get('/etsy/test-receipts', asyncRoute(async (req, res) => {
 
 app.get('/etsy/test-transactions', asyncRoute(async (req, res) => {
   const shopId = await getSavedShopId()
-  const transactions = await etsyFetch(`/shops/${shopId}/transactions?limit=100&offset=0`)
-  await writeJson('etsy-transactions.json', transactions)
+  const transactions = await etsyFetchAll(`/shops/${shopId}/transactions`, 'etsy-transactions.json')
 
   const rows = getResults(transactions)
     .slice(0, 5)

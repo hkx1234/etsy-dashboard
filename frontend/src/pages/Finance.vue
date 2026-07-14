@@ -81,7 +81,7 @@
         :data-source="visibleOrderRows"
         :loading="isSyncing"
         :pagination="{ pageSize: 10, showSizeChanger: false }"
-        :scroll="{ x: 1040 }"
+        :scroll="{ x: 1280 }"
         row-key="paymentId"
         size="middle"
       >
@@ -104,11 +104,47 @@
           <template v-else-if="column.key === 'ledgerSalesTax'">
             {{ record.shopCurrency }} {{ record.ledgerSalesTax.toFixed(2) }}
           </template>
-          <template v-else-if="column.key === 'logisticsStatus'">
-            <a-tag color="default">{{ record.logisticsStatus }}</a-tag>
+          <template v-else-if="column.key === 'logisticsUnitPrice'">
+            <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsUnitPrice, record.logisticsCurrency) }}/kg</span>
+            <span v-else class="logistics-unmatched">未匹配</span>
+          </template>
+          <template v-else-if="column.key === 'logisticsTotalAmount'">
+            <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsTotalAmount, record.logisticsCurrency) }}</span>
+            <span v-else class="logistics-unmatched">未匹配</span>
           </template>
           <template v-else-if="column.key === 'status'">
             <a-tag :color="paymentStatusColor(record.status)">{{ record.status || '未知' }}</a-tag>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
+    <a-card class="panel-card finance-table-card" :bordered="false">
+      <template #title>物流费用明细</template>
+      <template #extra>
+        <a-tag color="gold">{{ formatNumber(currentFinance.logisticsRows.length) }} 单物流费用</a-tag>
+      </template>
+      <a-table
+        :columns="logisticsColumns"
+        :data-source="visibleLogisticsRows"
+        :loading="isSyncing"
+        :pagination="{ pageSize: 10, showSizeChanger: false }"
+        :scroll="{ x: 980 }"
+        row-key="logisticsKey"
+        size="middle"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'orderNo'">
+            #{{ record.orderNo }}
+          </template>
+          <template v-else-if="column.key === 'unitPrice'">
+            {{ formatCnyMoney(record.unitPrice, record.currency) }}/kg
+          </template>
+          <template v-else-if="column.key === 'totalAmount'">
+            {{ formatCnyMoney(record.totalAmount, record.currency) }}
+          </template>
+          <template v-else-if="column.key === 'weight'">
+            {{ record.weight.toFixed(3) }} kg
           </template>
         </template>
       </a-table>
@@ -157,7 +193,7 @@ import { periodOptions } from '@/data/mockData'
 import { createFallbackEtsyFinance, fetchEtsyFinance } from '@/api/etsyFinance'
 import PageLoading from '@/components/PageLoading.vue'
 import type { PeriodKey } from '@/types/business'
-import { formatNumber } from '@/utils/format'
+import { formatCnyMoney, formatNumber } from '@/utils/format'
 
 use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -178,6 +214,7 @@ const dateOptions = computed(() =>
   })),
 )
 const visibleOrderRows = computed(() => currentFinance.value.orderRows.slice(0, 80))
+const visibleLogisticsRows = computed(() => currentFinance.value.logisticsRows.slice(0, 80))
 const visibleLedgerRows = computed(() => currentFinance.value.ledgerRows.slice(0, 120))
 const syncStatusText = computed(() => {
   const sync = financeData.value.sync
@@ -194,7 +231,8 @@ const orderColumns = [
   { title: 'Payment 净额', key: 'amountNet', dataIndex: 'amountNet', width: 130 },
   { title: '账户入账', key: 'ledgerGross', dataIndex: 'ledgerGross', width: 130 },
   { title: '销售税', key: 'ledgerSalesTax', dataIndex: 'ledgerSalesTax', width: 110 },
-  { title: '物流费用', key: 'logisticsStatus', dataIndex: 'logisticsStatus', width: 120 },
+  { title: '物流单价', key: 'logisticsUnitPrice', dataIndex: 'logisticsUnitPrice', width: 120 },
+  { title: '物流总金额', key: 'logisticsTotalAmount', dataIndex: 'logisticsTotalAmount', width: 130 },
   { title: '状态', key: 'status', dataIndex: 'status', width: 110 },
 ]
 
@@ -206,6 +244,17 @@ const ledgerColumns = [
   { title: '关联对象', key: 'reference', dataIndex: 'referenceId', width: 170 },
   { title: '原始类型', key: 'type', dataIndex: 'type', width: 170 },
   { title: '说明', key: 'description', dataIndex: 'description' },
+]
+
+const logisticsColumns = [
+  { title: '订单号', key: 'orderNo', dataIndex: 'orderNo', width: 130 },
+  { title: '收货/计费时间', key: 'receivedAt', dataIndex: 'receivedAt', width: 170 },
+  { title: '转单号', key: 'trackingNo', dataIndex: 'trackingNo', width: 180 },
+  { title: '运输方式', key: 'shippingMethod', dataIndex: 'shippingMethod', width: 170 },
+  { title: '国家', key: 'country', dataIndex: 'country', width: 90 },
+  { title: '重量', key: 'weight', dataIndex: 'weight', width: 110 },
+  { title: '物流单价', key: 'unitPrice', dataIndex: 'unitPrice', width: 120 },
+  { title: '物流总金额', key: 'totalAmount', dataIndex: 'totalAmount', width: 130 },
 ]
 
 async function loadFinance(endDate?: string) {

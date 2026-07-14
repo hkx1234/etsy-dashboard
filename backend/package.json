@@ -21,6 +21,7 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mysql2": "^3.22.6"
+    "mysql2": "^3.22.6",
+    "undici": "^6.21.3"
   }
 }
