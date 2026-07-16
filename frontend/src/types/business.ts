@@ -1,4 +1,6 @@
 export type PeriodKey = 'day' | 'week' | 'month'
+export type DashboardPeriodKey = PeriodKey | 'ytd'
+export type FinancePeriodKey = PeriodKey | 'ytd'
 
 export interface WeeklyMetric {
   key: string
@@ -6,6 +8,33 @@ export interface WeeklyMetric {
   value: string
   note: string
   tone: 'blue' | 'green' | 'amber' | 'red'
+}
+
+export interface DashboardComparisonValue {
+  current: number
+  previous: number
+  change: number
+  percentChange: number | null
+}
+
+export interface DashboardComparisonMetric {
+  key: string
+  title: string
+  format: 'number' | 'usd' | 'cny'
+  unit: string
+  tone: 'blue' | 'green' | 'amber' | 'red'
+  week: DashboardComparisonValue
+  month: DashboardComparisonValue
+}
+
+export interface DashboardComparisons {
+  weekLabel: string
+  monthLabel: string
+  weekRangeLabel: string
+  previousWeekRangeLabel: string
+  monthRangeLabel: string
+  previousMonthRangeLabel: string
+  metrics: DashboardComparisonMetric[]
 }
 
 export interface WeeklyTrendItem {
@@ -28,7 +57,7 @@ export interface WeeklyTrendItem {
 }
 
 export interface DashboardPeriodData {
-  key: PeriodKey
+  key: DashboardPeriodKey
   label: string
   eyebrow: string
   title: string
@@ -41,6 +70,7 @@ export interface DashboardPeriodData {
   sourceTitle: string
   actionTitle: string
   metrics: WeeklyMetric[]
+  comparisons?: DashboardComparisons
   trends: WeeklyTrendItem[]
   trafficSources: TrafficSource[]
 }
@@ -58,7 +88,7 @@ export interface DashboardSourceFile {
   path: string
 }
 
-export type ReviewPeriodKey = 'week' | 'month' | 'all'
+export type ReviewPeriodKey = 'week' | 'month' | 'ytd' | 'all'
 
 export interface ReviewRatingDistribution {
   1: number
@@ -153,8 +183,8 @@ export interface EtsyDashboardResponse {
   selectedDate: string
   latestDate: string
   files: DashboardSourceFile[]
-  periods: Record<PeriodKey, DashboardPeriodData>
-  products: Record<PeriodKey, ProductPerformance[]>
+  periods: Record<DashboardPeriodKey, DashboardPeriodData>
+  products: Record<DashboardPeriodKey, ProductPerformance[]>
   fulfillment: FulfillmentStatus
   ads: AdReportData
   sync: DashboardSyncInfo
@@ -177,12 +207,19 @@ export interface FinanceSummary {
   ledgerAdSpend: number
   adSpend: number
   logisticsCost: number
+  logisticsCostUsd?: number
   logisticsOrders: number
   logisticsCurrency: string
+  usdCnyRate?: number
+  exchangeRateSource?: string
+  exchangeRateUpdatedAt?: string
+  exchangeRateIsFallback?: boolean
   disbursements: number
   other: number
   ledgerNetChangeExcludingDisbursement: number
   estimatedProfitExcludingLogistics: number
+  estimatedProfit?: number
+  profitMargin?: number
   orders: number
   ledgerRows: number
   currency: string
@@ -196,7 +233,9 @@ export interface FinanceTrendItem {
   taxes: number
   adSpend: number
   logisticsCost: number
+  logisticsCostUsd?: number
   estimatedProfitExcludingLogistics: number
+  estimatedProfit?: number
   orders: number
 }
 
@@ -225,7 +264,10 @@ export interface FinanceOrderRow {
   logisticsCurrency: string
   logisticsWeight: number
   logisticsTrackingNo: string
+  logisticsTrackingNos?: string[]
   logisticsReceivedAt: string
+  logisticsShippingMethod?: string
+  logisticsCountry?: string
 }
 
 export interface FinanceLogisticsRow {
@@ -266,8 +308,18 @@ export interface FinanceBreakdownItem {
   amount: number
 }
 
+export interface FinanceComparison {
+  label: string
+  currentRangeLabel: string
+  previousRangeLabel: string
+  current: number
+  previous: number
+  change: number
+  percentChange: number | null
+}
+
 export interface FinancePeriodData {
-  key: PeriodKey
+  key: FinancePeriodKey
   label: string
   title: string
   rangeLabel: string
@@ -275,6 +327,7 @@ export interface FinancePeriodData {
   currency: string
   metrics: FinanceMetric[]
   summary: FinanceSummary
+  comparison?: FinanceComparison
   trends: FinanceTrendItem[]
   orderRows: FinanceOrderRow[]
   logisticsRows: FinanceLogisticsRow[]
@@ -293,7 +346,7 @@ export interface EtsyFinanceResponse {
   selectedDate: string
   latestDate: string
   files: DashboardSourceFile[]
-  periods: Record<PeriodKey, FinancePeriodData>
+  periods: Record<FinancePeriodKey, FinancePeriodData>
   sync: DashboardSyncInfo
 }
 
@@ -379,7 +432,7 @@ export interface AdReportData {
   updatedAt: string
   latestDate: string
   rows: AdReportRow[]
-  periods: Record<PeriodKey, AdPeriodSummary>
+  periods: Record<DashboardPeriodKey, AdPeriodSummary>
 }
 
 export interface MarketKeywordEntry {

@@ -6,15 +6,32 @@
         <div>
           <span class="eyebrow">Etsy Receipts</span>
           <h1>订单状态</h1>
-          <p>{{ summaryText }}</p>
+          <p class="order-heading-copy">
+            <template v-if="selectedMonthScope === 'ytd'">
+              <span>Year to Date 共 {{ formatNumber(activeScopedOrders.length) }} 个有效订单，其中待发货 {{ formatNumber(pendingOrderCount) }} 单，已发货 {{ formatNumber(shippedOrderCount) }} 单。</span>
+            </template>
+            <template v-else>
+              <span>有效订单较上个自然周{{ orderComparisonSummary.direction }} {{ formatNumber(Math.abs(orderComparisonSummary.change)) }} 单</span>
+              <span :class="['order-change-pill', `is-${orderComparisonSummary.tone}`]">{{ orderComparisonSummary.percentText }}</span>
+              <span>当前 {{ formatNumber(orderComparisonSummary.current) }} / 上期 {{ formatNumber(orderComparisonSummary.previous) }}；其中待发货 {{ formatNumber(pendingOrderCount) }} 单，已发货 {{ formatNumber(shippedOrderCount) }} 单。</span>
+            </template>
+          </p>
         </div>
         <div class="period-controls order-status-controls">
-          <span>截止日期</span>
+          <span>统计月份</span>
+          <a-select
+            v-model:value="selectedMonthScope"
+            :options="monthScopeOptions"
+            class="period-select"
+            size="middle"
+          />
+          <span>自然周</span>
           <a-select
             v-model:value="selectedDataDate"
-            :options="dateOptions"
+            :options="weekOptions"
             :loading="isSyncing"
-            class="date-select"
+            :disabled="selectedMonthScope === 'ytd'"
+            class="date-select week-select"
             size="middle"
           />
         </div>
@@ -44,10 +61,18 @@
         </button>
       </section>
 
-      <a-card class="panel-card table-card" :bordered="false">
+      <a-card class="panel-card table-card order-detail-panel" :bordered="false">
         <template #title>{{ activeStatusLabel }}明细</template>
         <template #extra>
-          <a-segmented v-model:value="statusFilter" :options="statusOptions" />
+          <div class="table-extra-controls order-detail-controls">
+            <a-input
+              v-model:value="orderSearchKeyword"
+              allow-clear
+              class="order-search-input"
+              placeholder="搜索订单号"
+            />
+            <a-segmented v-model:value="statusFilter" :options="statusOptions" />
+          </div>
         </template>
         <a-table
           :columns="columns"
@@ -132,8 +157,11 @@ type OrderStatusFilter = 'all' | 'pending' | 'shipped' | 'overdue' | 'unpaid' | 
 const route = useRoute()
 const router = useRouter()
 const dashboardData = ref<EtsyDashboardResponse>(createFallbackEtsyDashboard())
-const selectedDataDate = ref(String(route.query.endDate || dashboardData.value.selectedDate))
+const initialDataDate = String(route.query.endDate || dashboardData.value.selectedDate)
+const selectedMonthScope = ref(normalizeMonthScope(route.query.scope, initialDataDate))
+const selectedDataDate = ref(selectedMonthScope.value === 'ytd' ? initialDataDate : weekEndDateKey(initialDataDate))
 const statusFilter = ref<OrderStatusFilter>(normalizeStatusFilter(route.query.status))
+const orderSearchKeyword = ref('')
 const isSyncing = ref(false)
 const hasLoaded = ref(false)
 const syncError = ref('')
@@ -161,23 +189,60 @@ const columns = [
 const fulfillment = computed(() => dashboardData.value.fulfillment)
 const allOrders = computed(() => fulfillment.value.orders?.length ? fulfillment.value.orders : fulfillment.value.items)
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
-const dateOptions = computed(() =>
-  dashboardData.value.availableDates.map((date) => ({
-    label: date,
-    value: date,
-  })),
-)
+const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
+const weekOptions = computed(() => selectedMonthScope.value === 'ytd'
+  ? [{ label: '年初至今', value: selectedDataDate.value }]
+  : buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
+const scopedOrders = computed(() => {
+  const endDate = selectedMonthScope.value === 'ytd'
+    ? dashboardData.value.latestDate || selectedDataDate.value
+    : selectedDataDate.value
+  const end = parseUtcDateKey(endDate)
+  const start = selectedMonthScope.value === 'ytd'
+    ? new Date(Date.UTC(end.getUTCFullYear(), 0, 1))
+    : startOfUtcWeek(end)
+  const startKey = formatUtcDateKey(start)
+  const endKey = formatUtcDateKey(end)
+
+  return allOrders.value.filter((order) => order.orderDate && order.orderDate >= startKey && order.orderDate <= endKey)
+})
+const activeScopedOrders = computed(() => scopedOrders.value.filter((order) => !order.isCanceled))
 const activeStatusLabel = computed(() => statusOptions.find((item) => item.value === statusFilter.value)?.label || '订单')
-const summaryText = computed(() =>
-  `已同步 ${formatNumber(fulfillment.value.totalReceipts)} 个有效订单，其中待发货 ${formatNumber(fulfillment.value.pendingShipment)} 单，已发货 ${formatNumber(fulfillment.value.shipped)} 单。`,
-)
+const pendingOrderCount = computed(() => activeScopedOrders.value.filter((order) => order.isPendingShipment).length)
+const shippedOrderCount = computed(() => activeScopedOrders.value.filter((order) => order.isShipped).length)
+const orderComparisonSummary = computed(() => {
+  const selectedEnd = parseUtcDateKey(selectedDataDate.value || dashboardData.value.latestDate)
+  const currentStart = startOfUtcWeek(selectedEnd)
+  const currentEnd = addUtcDays(currentStart, 7)
+  const previousStart = addUtcDays(currentStart, -7)
+  const previousEnd = currentStart
+  const current = countActiveOrdersBetween(currentStart, currentEnd)
+  const previous = countActiveOrdersBetween(previousStart, previousEnd)
+  const change = current - previous
+  const percentChange = previous === 0
+    ? current === 0
+      ? 0
+      : null
+    : Number(((change / Math.abs(previous)) * 100).toFixed(1))
+
+  return {
+    current,
+    previous,
+    change,
+    direction: change > 0 ? '增加' : change < 0 ? '减少' : '持平',
+    percentText: percentChange === null ? '上期为 0' : `${percentChange > 0 ? '+' : ''}${percentChange.toFixed(1)}%`,
+    tone: change > 0 ? 'up' : change < 0 ? 'down' : 'flat',
+  }
+})
 const statusCards = computed<Array<{ key: OrderStatusFilter; title: string; value: number; note: string; tone: 'blue' | 'green' | 'amber' | 'red' }>>(() => [
-  { key: 'all', title: '全部订单', value: fulfillment.value.totalReceipts, note: '不含已取消订单', tone: 'blue' },
-  { key: 'pending', title: '待发货订单', value: fulfillment.value.pendingShipment, note: '已付款但还未发货', tone: 'amber' },
-  { key: 'shipped', title: '已发货订单', value: fulfillment.value.shipped, note: '来自已同步订单', tone: 'green' },
-  { key: 'overdue', title: '逾期风险', value: fulfillment.value.overdue, note: '预计发货日已过', tone: 'red' },
+  { key: 'all', title: '全部订单', value: activeScopedOrders.value.length, note: '不含已取消订单', tone: 'blue' },
+  { key: 'pending', title: '待发货订单', value: activeScopedOrders.value.filter((order) => order.isPendingShipment).length, note: '已付款但还未发货', tone: 'amber' },
+  { key: 'shipped', title: '已发货订单', value: activeScopedOrders.value.filter((order) => order.isShipped).length, note: '来自已同步订单', tone: 'green' },
+  { key: 'overdue', title: '逾期风险', value: activeScopedOrders.value.filter((order) => order.isOverdue).length, note: '预计发货日已过', tone: 'red' },
 ])
-const filteredOrders = computed(() => allOrders.value.filter((order) => orderMatchesFilter(order, statusFilter.value)))
+const filteredOrders = computed(() => scopedOrders.value.filter((order) => (
+  orderMatchesFilter(order, statusFilter.value) && orderMatchesSearch(order, orderSearchKeyword.value)
+)))
 
 function normalizeStatusFilter(value: unknown): OrderStatusFilter {
   const text = String(value || '')
@@ -191,6 +256,28 @@ function orderMatchesFilter(order: FulfillmentOrder, filter: OrderStatusFilter) 
   if (filter === 'unpaid') return !order.isPaid && !order.isCanceled
   if (filter === 'canceled') return Boolean(order.isCanceled)
   return !order.isCanceled
+}
+
+function normalizeOrderSearch(value: string) {
+  return value.replace(/^#/, '').replace(/\s+/g, '').trim()
+}
+
+function orderMatchesSearch(order: FulfillmentOrder, keyword: string) {
+  const query = normalizeOrderSearch(keyword)
+  if (!query) return true
+  return String(order.receiptId || '').includes(query)
+}
+
+function countActiveOrdersBetween(start: Date, end: Date) {
+  const startKey = formatUtcDateKey(start)
+  const endKey = formatUtcDateKey(end)
+
+  return allOrders.value.filter((order) => (
+    !order.isCanceled &&
+    order.orderDate &&
+    order.orderDate >= startKey &&
+    order.orderDate < endKey
+  )).length
 }
 
 function setStatusFilter(filter: OrderStatusFilter) {
@@ -209,7 +296,9 @@ async function loadOrders(endDate?: string) {
   try {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
-    selectedDataDate.value = data.selectedDate || data.latestDate
+    selectedDataDate.value = selectedMonthScope.value === 'ytd'
+      ? data.latestDate || data.selectedDate
+      : weekEndDateKey(data.selectedDate || data.latestDate)
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : 'Etsy 订单状态同步失败'
@@ -224,6 +313,7 @@ function syncQuery() {
     path: '/orders',
     query: {
       status: statusFilter.value === 'all' ? undefined : statusFilter.value,
+      scope: selectedMonthScope.value,
       endDate: selectedDataDate.value,
     },
   })
@@ -239,5 +329,104 @@ watch(selectedDataDate, (date, oldDate) => {
   void loadOrders(date)
 })
 
+watch(selectedMonthScope, (scope, oldScope) => {
+  if (!scope || scope === oldScope) return
+  const nextDate = scope === 'ytd'
+    ? dashboardData.value.latestDate || selectedDataDate.value
+    : defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
+
+  if (nextDate === selectedDataDate.value) {
+    syncQuery()
+    void loadOrders(nextDate)
+    return
+  }
+
+  selectedDataDate.value = nextDate
+})
+
 watch(statusFilter, syncQuery)
+
+function parseUtcDateKey(value: string) {
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return new Date()
+  return new Date(Date.UTC(year, month - 1, day))
+}
+
+function formatUtcDateKey(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date: Date, days: number) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000)
+}
+
+function startOfUtcWeek(date: Date) {
+  const day = date.getUTCDay() || 7
+  return addUtcDays(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())), 1 - day)
+}
+
+function monthScopeValue(dateKey: string) {
+  const date = parseUtcDateKey(dateKey)
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  return `${date.getUTCFullYear()}-${month}`
+}
+
+function normalizeMonthScope(value: unknown, fallbackDate: string) {
+  const scope = String(value || '')
+  if (scope === 'ytd') return 'ytd'
+  return /^\d{4}-\d{2}$/.test(scope) ? scope : monthScopeValue(fallbackDate)
+}
+
+function monthScopeLabel(value: string) {
+  const [year, month] = value.split('-')
+  return `${year}年${Number(month)}月`
+}
+
+function weekEndDateKey(dateKey: string) {
+  return formatUtcDateKey(addUtcDays(startOfUtcWeek(parseUtcDateKey(dateKey)), 6))
+}
+
+function buildMonthScopeOptions(latestDate: string) {
+  const latest = parseUtcDateKey(latestDate)
+  const year = latest.getUTCFullYear()
+  const latestMonth = latest.getUTCMonth()
+  const monthOptions = Array.from({ length: latestMonth + 1 }, (_, index) => {
+    const monthIndex = latestMonth - index
+    const value = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+    return { label: monthScopeLabel(value), value }
+  })
+
+  return [{ label: 'Year to Date', value: 'ytd' }, ...monthOptions]
+}
+
+function monthWeekStarts(scope: string, latestDate: string) {
+  const [year, month] = scope.split('-').map(Number)
+  const latestWeekStart = startOfUtcWeek(parseUtcDateKey(latestDate))
+  const monthStart = new Date(Date.UTC(year, month - 1, 1))
+  const nextMonthStart = new Date(Date.UTC(year, month, 1))
+  const firstWeekStart = startOfUtcWeek(monthStart)
+  const starts: Date[] = []
+
+  for (let start = firstWeekStart; start < nextMonthStart; start = addUtcDays(start, 7)) {
+    if (start.getUTCMonth() !== month - 1) continue
+    if (start > latestWeekStart) continue
+    starts.push(start)
+  }
+
+  return starts
+}
+
+function buildWeekOptions(scope: string, latestDate: string) {
+  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
+    const end = addUtcDays(start, 6)
+    return {
+      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+      value: formatUtcDateKey(end),
+    }
+  })
+}
+
+function defaultWeekEndForScope(scope: string, latestDate: string) {
+  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+}
 </script>

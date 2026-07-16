@@ -1,7 +1,7 @@
-import type { EtsyFinanceResponse, PeriodKey } from '@/types/business'
+import type { EtsyFinanceResponse, FinancePeriodKey } from '@/types/business'
 import { authFetch, parseJsonResponse } from './auth'
 
-const periodKeys: PeriodKey[] = ['day', 'week', 'month']
+const periodKeys: FinancePeriodKey[] = ['day', 'week', 'month', 'ytd']
 
 function localDateKey() {
   const now = new Date()
@@ -11,8 +11,8 @@ function localDateKey() {
   return `${year}-${month}-${day}`
 }
 
-function emptyPeriod(key: PeriodKey): EtsyFinanceResponse['periods'][PeriodKey] {
-  const label = key === 'day' ? '按日' : key === 'week' ? '最近7天' : '最近30天'
+function emptyPeriod(key: FinancePeriodKey): EtsyFinanceResponse['periods'][FinancePeriodKey] {
+  const label = key === 'day' ? '按日' : key === 'week' ? '自然周' : key === 'month' ? '统计月份' : 'Year to Date'
   return {
     key,
     label,
@@ -30,12 +30,19 @@ function emptyPeriod(key: PeriodKey): EtsyFinanceResponse['periods'][PeriodKey] 
       ledgerAdSpend: 0,
       adSpend: 0,
       logisticsCost: 0,
+      logisticsCostUsd: 0,
       logisticsOrders: 0,
       logisticsCurrency: 'CNY',
+      usdCnyRate: 7.2,
+      exchangeRateSource: 'fallback',
+      exchangeRateUpdatedAt: '',
+      exchangeRateIsFallback: true,
       disbursements: 0,
       other: 0,
       ledgerNetChangeExcludingDisbursement: 0,
       estimatedProfitExcludingLogistics: 0,
+      estimatedProfit: 0,
+      profitMargin: 0,
       orders: 0,
       ledgerRows: 0,
       currency: 'USD',

@@ -2,35 +2,43 @@
   <div class="page etsy-dashboard">
     <PageLoading v-if="isInitialLoading" />
     <template v-else>
-    <section class="etsy-hero">
-      <div class="etsy-hero-main">
-        <div class="period-toolbar">
-          <span class="eyebrow">{{ currentDashboard.eyebrow }}</span>
-          <div class="period-controls">
-            <span>统计周期</span>
-            <a-select
-              v-model:value="selectedPeriod"
-              :options="periodOptions"
-              class="period-select"
-              size="middle"
-            />
-            <span>截止日期</span>
-            <a-select
-              v-model:value="selectedDataDate"
-              :options="dateOptions"
-              :loading="isSyncing"
-              class="date-select"
-              size="middle"
-            />
-          </div>
-        </div>
-        <h1>{{ currentDashboard.title }}</h1>
-        <p>{{ currentDashboard.summary }}</p>
-        <div class="period-meta">
-          <span>统计范围：{{ currentDashboard.rangeLabel }}</span>
-          <span>{{ syncStatusText }}</span>
-        </div>
+    <section class="page-heading compact-heading">
+      <div>
+        <span class="eyebrow">Etsy Business Overview</span>
+        <h1>经营总览</h1>
+        <p class="overview-heading-copy">
+          <template v-if="comparisonSummary">
+            <span>本自然周共 {{ formatNumber(comparisonSummary.week.current) }} 单，较上周同期{{ comparisonSummary.week.direction }} {{ formatNumber(Math.abs(comparisonSummary.week.change)) }} 单</span>
+            <span :class="['overview-change-pill', `is-${comparisonSummary.week.tone}`]">{{ comparisonSummary.week.percentText }}</span>
+            <span>；本月至今共 {{ formatNumber(comparisonSummary.month.current) }} 单，较上月同期{{ comparisonSummary.month.direction }} {{ formatNumber(Math.abs(comparisonSummary.month.change)) }} 单</span>
+            <span :class="['overview-change-pill', `is-${comparisonSummary.month.tone}`]">{{ comparisonSummary.month.percentText }}</span>
+          </template>
+          <template v-else>
+            <span>{{ currentDashboard.summary }}</span>
+          </template>
+        </p>
       </div>
+      <div class="period-controls">
+        <span>统计月份</span>
+        <a-select
+          v-model:value="selectedMonthScope"
+          :options="monthScopeOptions"
+          class="period-select ytd-period-select"
+          size="middle"
+        />
+        <span>自然周</span>
+        <a-select
+          v-model:value="selectedDataDate"
+          :options="weekOptions"
+          :loading="isSyncing"
+          :disabled="selectedMonthScope === 'ytd'"
+          class="date-select week-select"
+          size="middle"
+        />
+      </div>
+    </section>
+
+    <section class="dashboard-best-product">
       <div class="best-product-card">
         <img
           v-if="bestProduct?.imageUrl"
@@ -63,110 +71,13 @@
       </article>
     </section>
 
-    <section class="fulfillment-panel-wrap">
-      <a-card class="panel-card fulfillment-panel" :bordered="false">
-        <template #title>当前履约状态</template>
-        <template #extra>
-          <span class="fulfillment-date">当前日期：{{ fulfillment.currentDate }}</span>
-        </template>
-        <div class="fulfillment-content">
-          <div class="fulfillment-metrics compact">
-            <button type="button" class="fulfillment-stat fulfillment-stat-button" @click="openOrderStatus('pending')">
-              <span>待发货订单</span>
-              <strong>{{ formatNumber(fulfillment.pendingShipment) }}</strong>
-              <p>已付款但还未发货</p>
-            </button>
-            <button
-              type="button"
-              class="fulfillment-stat fulfillment-stat-button"
-              :class="{ danger: fulfillment.overdue > 0 }"
-              @click="openOrderStatus('overdue')"
-            >
-              <span>逾期风险</span>
-              <strong>{{ formatNumber(fulfillment.overdue) }}</strong>
-              <p>预计发货日已过</p>
-            </button>
-            <button type="button" class="fulfillment-stat fulfillment-stat-button" @click="openOrderStatus('shipped')">
-              <span>已发货订单</span>
-              <strong>{{ formatNumber(fulfillment.shipped) }}</strong>
-              <p>来自已同步订单</p>
-            </button>
-          </div>
-          <a-table
-            class="fulfillment-table"
-            :columns="fulfillmentColumns"
-            :data-source="fulfillmentActionItems"
-            :loading="isSyncing"
-            :locale="{ emptyText: '当前没有待发货订单，已同步订单均已发货' }"
-            :pagination="false"
-            row-key="receiptId"
-            :scroll="{ x: 1040 }"
-            size="middle"
-          >
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'receiptId'">
-                #{{ record.receiptId }}
-              </template>
-              <template v-if="column.key === 'expectedShipDate'">
-                {{ record.expectedShipDate || '未提供' }}
-              </template>
-              <template v-if="column.key === 'fulfillmentStatus'">
-                <a-tag :color="fulfillmentStatusColor(record.fulfillmentStatus)">
-                  {{ record.fulfillmentStatus }}
-                </a-tag>
-              </template>
-              <template v-if="column.key === 'productSummary'">
-                <div v-if="record.productItems?.length" class="fulfillment-product-list">
-                  <div
-                    v-for="(item, index) in record.productItems"
-                    :key="`${record.receiptId}-${item.listingId || index}`"
-                    class="fulfillment-product-cell"
-                  >
-                    <img
-                      v-if="item.imageUrl"
-                      class="order-product-thumb"
-                      :src="item.imageUrl"
-                      :alt="item.title"
-                    />
-                    <span v-else class="order-product-thumb order-product-thumb-empty" aria-hidden="true" />
-                    <div class="fulfillment-product">
-                      <strong>{{ item.title || record.productSummary }}</strong>
-                      <span>{{ formatNumber(item.quantity || 1) }} 件</span>
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="fulfillment-product-cell">
-                  <span class="order-product-thumb order-product-thumb-empty" aria-hidden="true" />
-                  <div class="fulfillment-product">
-                    <strong>{{ record.productSummary }}</strong>
-                    <span>{{ formatNumber(record.itemCount) }} 件</span>
-                  </div>
-                </div>
-              </template>
-              <template v-if="column.key === 'total'">
-                {{ formatMoney(record.total) }}
-              </template>
-              <template v-if="column.key === 'logisticsUnitPrice'">
-                <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsUnitPrice, record.logisticsCurrency) }}/kg</span>
-                <span v-else class="logistics-unmatched">未匹配</span>
-              </template>
-              <template v-if="column.key === 'logisticsTotalAmount'">
-                <span v-if="record.logisticsMatched">{{ formatCnyMoney(record.logisticsTotalAmount, record.logisticsCurrency) }}</span>
-                <span v-else class="logistics-unmatched">未匹配</span>
-              </template>
-            </template>
-          </a-table>
-        </div>
-      </a-card>
-    </section>
-
     <section class="etsy-two-column">
-      <a-card class="panel-card" :bordered="false">
+      <a-card class="panel-card dashboard-chart-panel trend-panel" :bordered="false">
         <template #title>{{ currentDashboard.trendTitle }}</template>
         <VChart class="chart chart-lg" :option="weeklyTrendOption" autoresize />
       </a-card>
 
-      <a-card class="panel-card" :bordered="false">
+      <a-card class="panel-card dashboard-chart-panel attribution-panel" :bordered="false">
         <template #title>{{ currentDashboard.sourceTitle }}</template>
         <VChart class="chart chart-lg" :option="orderAttributionPieOption" autoresize />
       </a-card>
@@ -177,77 +88,58 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { periodOptions } from '@/data/mockData'
 import { createFallbackEtsyDashboard, fetchEtsyDashboard } from '@/api/etsyDashboard'
 import PageLoading from '@/components/PageLoading.vue'
-import type { PeriodKey } from '@/types/business'
-import { formatCnyMoney, formatMoney, formatNumber } from '@/utils/format'
+import { formatMoney, formatNumber } from '@/utils/format'
 
 use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
-const selectedPeriod = ref<PeriodKey>('week')
-const router = useRouter()
 const dashboardData = ref(createFallbackEtsyDashboard())
-const selectedDataDate = ref(dashboardData.value.selectedDate)
+const selectedMonthScope = ref(monthScopeValue(dashboardData.value.latestDate || dashboardData.value.selectedDate))
+const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const isSyncing = ref(false)
 const hasLoaded = ref(false)
 const syncError = ref('')
 let autoRefreshTimer: number | undefined
 
-const currentDashboard = computed(() => dashboardData.value.periods[selectedPeriod.value])
+const selectedPeriod = computed(() => selectedMonthScope.value === 'ytd' ? 'ytd' as const : 'week' as const)
+const currentDashboard = computed(() => dashboardData.value.periods[selectedPeriod.value] ?? dashboardData.value.periods.week)
 const currentMetrics = computed(() => currentDashboard.value.metrics)
 const dashboardMetricCards = computed(() => currentMetrics.value.filter((item) => item.key !== 'best'))
+const currentComparisons = computed(() => currentDashboard.value.comparisons)
+const comparisonSummary = computed(() => {
+  const orderComparison = currentComparisons.value?.metrics.find((item) => item.key === 'orders')
+  if (!orderComparison) return null
+
+  return {
+    week: formatComparisonValue(orderComparison.week),
+    month: formatComparisonValue(orderComparison.month),
+  }
+})
 const currentTrends = computed(() => currentDashboard.value.trends)
 const currentOrderAttribution = computed(() => currentDashboard.value.trafficSources)
 const currentProducts = computed(() => dashboardData.value.products[selectedPeriod.value] ?? [])
 const bestProduct = computed(() => currentProducts.value[0])
-const fulfillment = computed(() => dashboardData.value.fulfillment)
-const fulfillmentActionItems = computed(() => fulfillment.value.items.slice(0, 8))
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
-const dateOptions = computed(() =>
-  dashboardData.value.availableDates.map((date) => ({
-    label: date,
-    value: date,
-  })),
-)
-const syncStatusText = computed(() => {
-  const sync = dashboardData.value.sync
-  if (isSyncing.value) return '正在同步 Etsy API'
-  if (sync.status === 'synced' || sync.status === 'cached') return `${sync.message} · 最新 ${dashboardData.value.latestDate}`
-  return sync.message
-})
+const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
+const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
 
-const fulfillmentColumns = [
-  { title: '订单号', key: 'receiptId', dataIndex: 'receiptId', width: 130 },
-  { title: '下单时间', key: 'orderDate', dataIndex: 'orderDate', width: 120 },
-  { title: '预计发货日', key: 'expectedShipDate', dataIndex: 'expectedShipDate', width: 130 },
-  { title: '状态', key: 'fulfillmentStatus', dataIndex: 'fulfillmentStatus', width: 120 },
-  { title: '商品', key: 'productSummary', dataIndex: 'productSummary' },
-  { title: '金额', key: 'total', dataIndex: 'total', width: 110 },
-  { title: '物流单价', key: 'logisticsUnitPrice', dataIndex: 'logisticsUnitPrice', width: 120 },
-  { title: '物流总金额', key: 'logisticsTotalAmount', dataIndex: 'logisticsTotalAmount', width: 130 },
-]
+function formatComparisonValue(value: { current: number; previous: number; change: number; percentChange: number | null }) {
+  const percentText = value.percentChange === null
+    ? '上期为 0'
+    : `${value.percentChange > 0 ? '+' : ''}${value.percentChange.toFixed(1)}%`
 
-function fulfillmentStatusColor(status: string) {
-  if (status === '待发货') return 'blue'
-  if (status === '已发货') return 'green'
-  return 'default'
-}
-
-function openOrderStatus(status: 'pending' | 'overdue' | 'shipped') {
-  router.push({
-    path: '/orders',
-    query: {
-      status,
-      endDate: selectedDataDate.value,
-    },
-  })
+  return {
+    ...value,
+    direction: value.change > 0 ? '增加' : value.change < 0 ? '减少' : '持平',
+    percentText,
+    tone: value.change > 0 ? 'up' : value.change < 0 ? 'down' : 'flat',
+  }
 }
 
 async function loadEtsyDashboard(endDate?: string) {
@@ -255,7 +147,8 @@ async function loadEtsyDashboard(endDate?: string) {
   try {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
-    selectedDataDate.value = data.selectedDate || data.latestDate
+    const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
+    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : 'Etsy API 同步失败'
@@ -266,9 +159,9 @@ async function loadEtsyDashboard(endDate?: string) {
 }
 
 onMounted(() => {
-  void loadEtsyDashboard()
+  void loadEtsyDashboard(selectedDataDate.value)
   autoRefreshTimer = window.setInterval(() => {
-    void loadEtsyDashboard()
+    void loadEtsyDashboard(selectedDataDate.value)
   }, 10 * 60 * 1000)
 })
 
@@ -281,10 +174,114 @@ watch(selectedDataDate, (date, oldDate) => {
   void loadEtsyDashboard(date)
 })
 
+watch(selectedMonthScope, (scope, oldScope) => {
+  if (!scope || scope === oldScope) return
+  const nextDate = defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
+  if (nextDate === selectedDataDate.value) {
+    void loadEtsyDashboard(nextDate)
+    return
+  }
+  selectedDataDate.value = nextDate
+})
+
 function formatTrendAxisLabel(item: { label: string; rangeLabel?: string }) {
-  if (selectedPeriod.value === 'day' || !item.rangeLabel?.includes(' - ')) return item.label
+  if (selectedPeriod.value !== 'week' || !item.rangeLabel?.includes(' - ')) return item.label
   const [start, end] = item.rangeLabel.split(' - ')
   return `${start.slice(5).replace('-', '/')}-${end.slice(5).replace('-', '/')}`
+}
+
+function parseUtcDateKey(value: string) {
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return new Date()
+  return new Date(Date.UTC(year, month - 1, day))
+}
+
+function formatUtcDateKey(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date: Date, days: number) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000)
+}
+
+function startOfUtcWeek(date: Date) {
+  const day = date.getUTCDay() || 7
+  return addUtcDays(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())), 1 - day)
+}
+
+function monthScopeValue(dateKey: string) {
+  const date = parseUtcDateKey(dateKey)
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  return `${date.getUTCFullYear()}-${month}`
+}
+
+function monthScopeLabel(value: string) {
+  const [year, month] = value.split('-')
+  return `${year}年${Number(month)}月`
+}
+
+function weekEndDateKey(dateKey: string) {
+  return formatUtcDateKey(addUtcDays(startOfUtcWeek(parseUtcDateKey(dateKey)), 6))
+}
+
+function buildMonthScopeOptions(latestDate: string) {
+  const latest = parseUtcDateKey(latestDate)
+  const year = latest.getUTCFullYear()
+  const latestMonth = latest.getUTCMonth()
+  const monthOptions = Array.from({ length: latestMonth + 1 }, (_, index) => {
+    const monthIndex = latestMonth - index
+    const value = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+
+    return {
+      label: monthScopeLabel(value),
+      value,
+    }
+  })
+
+  return [
+    { label: 'Year to Date', value: 'ytd' },
+    ...monthOptions,
+  ]
+}
+
+function monthWeekStarts(scope: string, latestDate: string) {
+  const [year, month] = scope.split('-').map(Number)
+  const latestWeekStart = startOfUtcWeek(parseUtcDateKey(latestDate))
+  const monthStart = new Date(Date.UTC(year, month - 1, 1))
+  const nextMonthStart = new Date(Date.UTC(year, month, 1))
+  const firstWeekStart = startOfUtcWeek(monthStart)
+  const starts: Date[] = []
+
+  for (let start = firstWeekStart; start < nextMonthStart; start = addUtcDays(start, 7)) {
+    if (start.getUTCMonth() !== month - 1) continue
+    if (start > latestWeekStart) continue
+    starts.push(start)
+  }
+
+  return starts
+}
+
+function buildWeekOptions(scope: string, latestDate: string) {
+  if (scope === 'ytd') {
+    return [{ label: '年初至今', value: latestDate }]
+  }
+
+  const starts = monthWeekStarts(scope, latestDate)
+
+  return starts.reverse().map((start) => {
+    const end = addUtcDays(start, 6)
+    const label = `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`
+
+    return {
+      label,
+      value: formatUtcDateKey(end),
+    }
+  })
+}
+
+function defaultWeekEndForScope(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
 }
 
 const weeklyTrendOption = computed(() => ({

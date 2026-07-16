@@ -28,15 +28,11 @@
       >
         <a-menu-item v-if="showOperationsPages" key="/dashboard">
           <DashboardOutlined />
-          <span>每周总览</span>
+          <span>经营总览</span>
         </a-menu-item>
         <a-menu-item v-if="showOperationsPages" key="/products">
           <TagsOutlined />
           <span>产品表现</span>
-        </a-menu-item>
-        <a-menu-item v-if="showOperationsPages" key="/inventory">
-          <DatabaseOutlined />
-          <span>库存看板</span>
         </a-menu-item>
         <a-menu-item v-if="showOperationsPages" key="/orders">
           <ProfileOutlined />
@@ -115,7 +111,6 @@ import {
   AccountBookOutlined,
   ClockCircleOutlined,
   DashboardOutlined,
-  DatabaseOutlined,
   FundOutlined,
   MessageOutlined,
   MenuFoldOutlined,
@@ -149,7 +144,7 @@ const selectedKey = computed(() => {
   return `/${firstSegment}`
 })
 
-const pageTitle = computed(() => String(route.meta.title ?? '每周总览'))
+const pageTitle = computed(() => String(route.meta.title ?? '经营总览'))
 
 function handleMenuClick(info: { key: string | number }) {
   router.push(String(info.key))

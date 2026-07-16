@@ -1,8 +1,8 @@
 import { periodDashboardData, productPerformance } from '@/data/mockData'
-import type { AdPeriodSummary, EtsyDashboardResponse, PeriodKey } from '@/types/business'
+import type { AdPeriodSummary, DashboardPeriodKey, EtsyDashboardResponse } from '@/types/business'
 import { authFetch, parseJsonResponse } from './auth'
 
-const periodKeys: PeriodKey[] = ['day', 'week', 'month']
+const periodKeys: DashboardPeriodKey[] = ['day', 'week', 'month', 'ytd']
 const emptyAdPeriod: AdPeriodSummary = {
   rows: 0,
   views: 0,
@@ -27,6 +27,13 @@ function localDateKey() {
 
 export function createFallbackEtsyDashboard(): EtsyDashboardResponse {
   const today = localDateKey()
+  const ytdPeriod = {
+    ...periodDashboardData.month,
+    key: 'ytd' as const,
+    label: 'Year to Date',
+    title: 'Year to Date 经营总览',
+    rangeLabel: `${today.slice(0, 4)}-01-01 - ${today}`,
+  }
 
   return {
     ok: false,
@@ -36,7 +43,10 @@ export function createFallbackEtsyDashboard(): EtsyDashboardResponse {
     selectedDate: today,
     latestDate: today,
     files: [],
-    periods: periodDashboardData,
+    periods: {
+      ...periodDashboardData,
+      ytd: ytdPeriod,
+    },
     products: periodKeys.reduce(
       (result, key) => ({
         ...result,

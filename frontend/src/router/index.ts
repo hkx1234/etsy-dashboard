@@ -4,7 +4,6 @@ import MainLayout from '@/layouts/MainLayout.vue'
 import ComingSoon from '@/pages/ComingSoon.vue'
 import Dashboard from '@/pages/Dashboard.vue'
 import Finance from '@/pages/Finance.vue'
-import Inventory from '@/pages/Inventory.vue'
 import InternalFeedback from '@/pages/InternalFeedback.vue'
 import Login from '@/pages/Login.vue'
 import Orders from '@/pages/Orders.vue'
@@ -55,7 +54,7 @@ const router = createRouter({
           path: 'dashboard',
           name: 'dashboard',
           component: Dashboard,
-          meta: { title: '每周总览', allowedRoles: ['owner', 'admin', 'operator'] },
+          meta: { title: '经营总览', allowedRoles: ['owner', 'admin', 'operator'] },
         },
         {
           path: 'products',
@@ -65,9 +64,7 @@ const router = createRouter({
         },
         {
           path: 'inventory',
-          name: 'inventory',
-          component: Inventory,
-          meta: { title: '库存看板', allowedRoles: ['owner', 'admin', 'operator'] },
+          redirect: '/products',
         },
         {
           path: 'orders',

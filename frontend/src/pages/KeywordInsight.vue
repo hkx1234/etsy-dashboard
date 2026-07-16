@@ -6,17 +6,36 @@
       <div>
         <span class="eyebrow">Etsy Ads CSV</span>
         <h1>广告与流量</h1>
-        <p>读取广告报表文件夹里的最新 CSV，当前口径为 Etsy 站内广告流量。</p>
+        <p class="ad-heading-copy">
+          <span>{{ adSpendComparison.text }}</span>
+          <span :class="['ad-spend-change', `is-${adSpendComparison.tone}`]">
+            {{ adSpendComparison.value }}
+          </span>
+          <span v-if="adSpendComparison.detail" class="ad-spend-detail">{{ adSpendComparison.detail }}</span>
+          <a-tooltip placement="bottomLeft">
+            <template #title>
+              <div>{{ dashboardData.ads.sourceFile || '等待广告报表' }}</div>
+              <div>{{ dashboardData.ads.message }}</div>
+            </template>
+            <span class="ad-source-pill">广告数据 {{ adStatusText }}</span>
+          </a-tooltip>
+        </p>
       </div>
       <div class="period-controls">
-        <span>统计周期</span>
-        <a-select v-model:value="selectedPeriod" :options="periodOptions" class="period-select" size="middle" />
-        <span>截止日期</span>
+        <span>统计月份</span>
+        <a-select
+          v-model:value="selectedMonthScope"
+          :options="monthScopeOptions"
+          class="period-select ytd-period-select"
+          size="middle"
+        />
+        <span>自然周</span>
         <a-select
           v-model:value="selectedDataDate"
-          :options="dateOptions"
+          :options="weekOptions"
           :loading="isSyncing"
-          class="date-select"
+          :disabled="selectedMonthScope === 'ytd'"
+          class="date-select week-select"
           size="middle"
         />
       </div>
@@ -30,14 +49,6 @@
       :message="syncError"
       description="页面会保留备用展示数据；本地 Etsy API 服务恢复后刷新即可同步。"
     />
-
-    <section class="ad-source-strip">
-      <div>
-        <strong>{{ dashboardData.ads.sourceFile || '等待广告报表' }}</strong>
-        <span>{{ dashboardData.ads.message }}</span>
-      </div>
-      <a-tag :color="adStatusColor">{{ adStatusText }}</a-tag>
-    </section>
 
     <section class="etsy-metric-grid ad-grid">
       <article class="etsy-metric-card tone-amber">
@@ -72,158 +83,117 @@
       </article>
     </section>
 
-    <section class="ad-source-strip market-source-strip">
-      <div>
-        <strong>市场关键词雷达 · {{ marketData.scopeLabel }}</strong>
-        <span>{{ marketData.sync.message }}</span>
-      </div>
-      <div class="market-source-actions">
-        <span>关键词维度</span>
-        <a-select v-model:value="marketScope" :options="marketScopeOptions" class="market-scope-select" size="small" />
-        <a-tag :color="marketStatusColor">{{ marketStatusText }}</a-tag>
-        <a-button size="small" :loading="isMarketSyncing" @click="loadMarketKeywords(true)">重新采样</a-button>
-      </div>
-    </section>
-
-    <section class="etsy-metric-grid market-keyword-grid">
-      <article class="etsy-metric-card tone-blue">
-        <span>样本关键词</span>
-        <strong>{{ formatNumber(marketData.keywords.length) }}</strong>
-        <p>来自公开 marketplace 搜索结果标题和标签</p>
-      </article>
-      <article class="etsy-metric-card tone-amber">
-        <span>最高结果数词</span>
-        <strong>{{ topMarketSeed.keyword || '暂无' }}</strong>
-        <p>{{ formatNumber(topMarketSeed.resultCount) }} 个 Etsy 搜索结果</p>
-      </article>
-      <article class="etsy-metric-card tone-red">
-        <span>最高热度词</span>
-        <strong>{{ topMarketKeyword.keyword || '暂无' }}</strong>
-        <p>样本热度分 {{ formatNumber(topMarketKeyword.score) }}</p>
-      </article>
-    </section>
-
-    <section class="etsy-two-column market-keyword-section">
-      <a-card class="panel-card table-card" :bordered="false">
-        <template #title>公开市场关键词排行</template>
-        <a-alert
-          v-if="marketError"
-          class="sync-alert compact-alert"
-          type="warning"
-          show-icon
-          :message="marketError"
-        />
-        <a-table
-          :columns="marketKeywordColumns"
-          :data-source="topMarketKeywords"
-          :loading="isMarketSyncing"
-          :pagination="false"
-          row-key="keyword"
-          :scroll="{ x: 900 }"
-          size="middle"
-        >
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.key === 'keyword'">
-              <div class="market-keyword-cell">
-                <strong>{{ record.keyword }}</strong>
-                <span>{{ record.sourceSeeds.slice(0, 3).join(' / ') }}</span>
-              </div>
-            </template>
-            <template v-if="column.key === 'score'">
-              {{ formatNumber(record.score) }}
-            </template>
-            <template v-if="column.key === 'listingCount'">
-              {{ formatNumber(record.listingCount) }}
-            </template>
-            <template v-if="column.key === 'tagUses'">
-              {{ formatNumber(record.tagUses) }}
-            </template>
-            <template v-if="column.key === 'titleUses'">
-              {{ formatNumber(record.titleUses) }}
-            </template>
-            <template v-if="column.key === 'searchUrl'">
-              <a :href="record.searchUrl" target="_blank" rel="noreferrer">打开</a>
-            </template>
-          </template>
-        </a-table>
-      </a-card>
-
-      <a-card class="panel-card" :bordered="false">
-        <template #title>高结果数种子词</template>
-        <div class="seed-report-list">
-          <article v-for="seed in topMarketSeeds" :key="seed.keyword">
-            <div class="seed-report-head">
-              <strong>{{ seed.keyword }}</strong>
-              <a :href="seed.searchUrl" target="_blank" rel="noreferrer">Etsy 搜索</a>
-            </div>
-            <p>{{ formatNumber(seed.resultCount) }} 个结果 / 样本均价 {{ formatMoney(seed.avgPrice) }}</p>
-            <div class="seed-tag-list">
-              <a-tag v-for="tag in seed.topTags.slice(0, 4)" :key="`${seed.keyword}-${tag.tag}`">
-                {{ tag.tag }}
-              </a-tag>
-            </div>
-          </article>
+    <section class="market-keyword-panel traffic-module module-market">
+      <div class="market-keyword-panel-head">
+        <div>
+          <strong>市场关键词雷达 · {{ marketData.scopeLabel }}</strong>
+          <span>{{ marketData.sync.message }}</span>
         </div>
-      </a-card>
+        <div class="market-source-actions">
+          <span>关键词维度</span>
+          <a-select v-model:value="marketScope" :options="marketScopeOptions" class="market-scope-select" size="small" />
+          <a-tag :color="marketStatusColor">{{ marketStatusText }}</a-tag>
+          <a-button size="small" :loading="isMarketSyncing" @click="loadMarketKeywords(true)">重新采样</a-button>
+        </div>
+      </div>
+
+      <section class="market-keyword-section">
+        <a-card class="panel-card table-card" :bordered="false">
+          <template #title>公开市场关键词排行</template>
+          <template #extra>
+            <span class="market-ranking-count">
+              {{ isMarketRankingExpanded ? '已展开' : `先展示前 ${MARKET_RANKING_PREVIEW_SIZE} 个` }}
+            </span>
+          </template>
+          <a-alert
+            v-if="marketError"
+            class="sync-alert compact-alert"
+            type="warning"
+            show-icon
+            :message="marketError"
+          />
+          <a-table
+            :columns="marketKeywordColumns"
+            :data-source="visibleMarketKeywords"
+            :loading="isMarketSyncing"
+            :pagination="false"
+            row-key="keyword"
+            :scroll="{ x: 900 }"
+            size="middle"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'keyword'">
+                <div class="market-keyword-cell">
+                  <strong>{{ record.keyword }}</strong>
+                  <span>{{ record.sourceSeeds.slice(0, 3).join(' / ') }}</span>
+                </div>
+              </template>
+              <template v-if="column.key === 'score'">
+                {{ formatNumber(record.score) }}
+              </template>
+              <template v-if="column.key === 'listingCount'">
+                {{ formatNumber(record.listingCount) }}
+              </template>
+              <template v-if="column.key === 'tagUses'">
+                {{ formatNumber(record.tagUses) }}
+              </template>
+              <template v-if="column.key === 'titleUses'">
+                {{ formatNumber(record.titleUses) }}
+              </template>
+              <template v-if="column.key === 'searchUrl'">
+                <a :href="record.searchUrl" target="_blank" rel="noreferrer">打开</a>
+              </template>
+            </template>
+          </a-table>
+          <div v-if="hasMoreMarketKeywords" class="market-ranking-toggle">
+            <a-button type="link" size="small" @click="isMarketRankingExpanded = !isMarketRankingExpanded">
+              {{ isMarketRankingExpanded ? '收起关键词排行' : `展开全部 ${formatNumber(topMarketKeywords.length)} 个关键词` }}
+            </a-button>
+          </div>
+        </a-card>
+      </section>
     </section>
 
     <section class="etsy-two-column">
-      <a-card class="panel-card" :bordered="false">
+      <a-card class="panel-card traffic-module-card module-trend" :bordered="false">
         <template #title>{{ currentTrendTitle }}</template>
         <VChart class="chart chart-lg" :option="adTrendOption" autoresize />
       </a-card>
 
-      <a-card class="panel-card action-card" :bordered="false">
-        <template #title>同步规则</template>
-        <div class="action-list">
-          <article>
-            <strong>每天 12 点自动识别</strong>
-            <p>新 CSV 下载到广告报表文件夹后，刷新看板会读取修改时间最新的表。</p>
-          </article>
-          <article>
-            <strong>当前只算站内广告</strong>
-            <p>CSV 来自 Etsy Ads 后台，因此这里的广告曝光、点击、花费和销售额都是站内广告口径。</p>
-          </article>
-          <article>
-            <strong>原始文件不改动</strong>
-            <p>本地 API 只读取 CSV，并保存一份解析缓存用于网络或磁盘临时异常时兜底。</p>
-          </article>
-        </div>
+      <a-card class="panel-card table-card ad-daily-card traffic-module-card module-detail" :bordered="false">
+        <template #title>广告日报明细</template>
+        <template #extra>
+          <a-tag color="blue">{{ dashboardData.ads.sourceDir }}</a-tag>
+        </template>
+        <a-table
+          :columns="columns"
+          :data-source="scopedAdRows"
+          :loading="isSyncing"
+          :pagination="false"
+          row-key="date"
+          :scroll="{ x: 760 }"
+          size="small"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'spend'">
+              {{ formatMoney(record.spend) }}
+            </template>
+            <template v-if="column.key === 'revenue'">
+              {{ formatMoney(record.revenue) }}
+            </template>
+            <template v-if="column.key === 'roas'">
+              {{ Number(record.roas || 0).toFixed(2) }}
+            </template>
+            <template v-if="column.key === 'clickRate'">
+              {{ formatPercent(record.clickRate) }}
+            </template>
+            <template v-if="column.key === 'endingBudget'">
+              {{ formatMoney(record.endingBudget) }}
+            </template>
+          </template>
+        </a-table>
       </a-card>
     </section>
-
-    <a-card class="panel-card table-card" :bordered="false">
-      <template #title>广告日报明细</template>
-      <template #extra>
-        <a-tag color="blue">{{ dashboardData.ads.sourceDir }}</a-tag>
-      </template>
-      <a-table
-        :columns="columns"
-        :data-source="adRows"
-        :loading="isSyncing"
-        :pagination="false"
-        row-key="date"
-        size="middle"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'spend'">
-            {{ formatMoney(record.spend) }}
-          </template>
-          <template v-if="column.key === 'revenue'">
-            {{ formatMoney(record.revenue) }}
-          </template>
-          <template v-if="column.key === 'roas'">
-            {{ Number(record.roas || 0).toFixed(2) }}
-          </template>
-          <template v-if="column.key === 'clickRate'">
-            {{ formatPercent(record.clickRate) }}
-          </template>
-          <template v-if="column.key === 'endingBudget'">
-            {{ formatMoney(record.endingBudget) }}
-          </template>
-        </template>
-      </a-table>
-    </a-card>
     </template>
   </div>
 </template>
@@ -235,40 +205,94 @@ import { use } from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { periodOptions } from '@/data/mockData'
 import { createFallbackEtsyDashboard, fetchEtsyDashboard } from '@/api/etsyDashboard'
 import { createFallbackMarketKeywords, fetchMarketKeywords } from '@/api/etsyMarketKeywords'
 import PageLoading from '@/components/PageLoading.vue'
-import type { MarketKeywordEntry, MarketKeywordScope, MarketSeedReport, PeriodKey } from '@/types/business'
+import type { MarketKeywordScope } from '@/types/business'
 import { formatMoney, formatNumber, formatPercent } from '@/utils/format'
 
 use([BarChart, LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
-const selectedPeriod = ref<PeriodKey>('week')
 const marketScope = ref<MarketKeywordScope>('category')
 const dashboardData = ref(createFallbackEtsyDashboard())
 const marketData = ref(createFallbackMarketKeywords(marketScope.value))
-const selectedDataDate = ref(dashboardData.value.selectedDate)
+const selectedMonthScope = ref(monthScopeValue(dashboardData.value.latestDate || dashboardData.value.selectedDate))
+const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const isSyncing = ref(false)
 const isMarketSyncing = ref(false)
 const hasLoadedAdDashboard = ref(false)
 const hasLoadedMarketKeywords = ref(false)
 const syncError = ref('')
 const marketError = ref('')
+const isMarketRankingExpanded = ref(false)
+const MARKET_RANKING_PREVIEW_SIZE = 8
 
+const selectedPeriod = computed(() => selectedMonthScope.value === 'ytd' ? 'ytd' as const : 'week' as const)
 const currentAd = computed(() => dashboardData.value.ads.periods[selectedPeriod.value])
 const isInitialLoading = computed(() =>
   (isSyncing.value && !hasLoadedAdDashboard.value) ||
   (isMarketSyncing.value && !hasLoadedMarketKeywords.value),
 )
-const currentTrendTitle = computed(() => dashboardData.value.periods[selectedPeriod.value].trendTitle.replace('每日趋势', '广告每日趋势').replace('周期对比', '广告周期对比'))
-const dateOptions = computed(() =>
-  dashboardData.value.availableDates.map((date) => ({
-    label: date,
-    value: date,
-  })),
-)
-const adRows = computed(() => [...dashboardData.value.ads.rows].sort((a, b) => b.date.localeCompare(a.date)))
+const currentTrendTitle = computed(() => dashboardData.value.periods[selectedPeriod.value].trendTitle
+  .replace('每日趋势', '广告每日趋势')
+  .replace('周期对比', '广告周期对比')
+  .replace('月度趋势', '广告月度趋势'))
+const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
+const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
+const allAdRows = computed(() => [...dashboardData.value.ads.rows].sort((a, b) => b.date.localeCompare(a.date)))
+const scopedAdRows = computed(() => {
+  const endDate = selectedMonthScope.value === 'ytd'
+    ? dashboardData.value.latestDate || selectedDataDate.value
+    : selectedDataDate.value
+  const end = parseUtcDateKey(endDate)
+  const start = selectedMonthScope.value === 'ytd'
+    ? new Date(Date.UTC(end.getUTCFullYear(), 0, 1))
+    : startOfUtcWeek(end)
+  const startKey = formatUtcDateKey(start)
+  const endKey = formatUtcDateKey(end)
+
+  return allAdRows.value.filter((row) => row.date >= startKey && row.date <= endKey)
+})
+const adSpendComparison = computed(() => {
+  const currentSpend = Number(currentAd.value.spend || 0)
+
+  if (selectedMonthScope.value === 'ytd') {
+    return {
+      text: '广告花费 Year to Date 累计',
+      value: formatMoney(currentSpend),
+      detail: '',
+      tone: 'flat',
+    }
+  }
+
+  const selectedEnd = parseUtcDateKey(selectedDataDate.value || dashboardData.value.latestDate)
+  const latest = parseUtcDateKey(dashboardData.value.ads.latestDate || dashboardData.value.latestDate || selectedDataDate.value)
+  const effectiveEnd = selectedEnd.getTime() > latest.getTime() ? latest : selectedEnd
+  const currentStart = startOfUtcWeek(selectedEnd)
+  const previousStart = addUtcDays(currentStart, -7)
+  const previousEnd = addUtcDays(effectiveEnd, -7)
+  const comparableCurrentSpend = sumAdSpendBetween(currentStart, effectiveEnd)
+  const previousSpend = sumAdSpendBetween(previousStart, previousEnd)
+  const detail = `当前 ${formatMoney(comparableCurrentSpend)} / 上期 ${formatMoney(previousSpend)}`
+
+  if (previousSpend <= 0) {
+    return {
+      text: '广告花费较上个自然周同期',
+      value: comparableCurrentSpend > 0 ? '新增花费' : '持平',
+      detail,
+      tone: comparableCurrentSpend > 0 ? 'up' : 'flat',
+    }
+  }
+
+  const percent = ((comparableCurrentSpend - previousSpend) / Math.abs(previousSpend)) * 100
+
+  return {
+    text: '广告花费较上个自然周同期',
+    value: `${percent > 0 ? '+' : ''}${formatPercent(percent)}`,
+    detail,
+    tone: percent > 0 ? 'up' : percent < 0 ? 'down' : 'flat',
+  }
+})
 const marketScopeOptions: Array<{ label: string; value: MarketKeywordScope }> = [
   { label: '当前品类', value: 'category' },
   { label: '全平台', value: 'platform' },
@@ -278,11 +302,6 @@ const adStatusText = computed(() => {
   if (dashboardData.value.ads.status === 'synced') return '已接入'
   if (dashboardData.value.ads.status === 'cached') return '使用缓存'
   return '等待报表'
-})
-const adStatusColor = computed(() => {
-  if (dashboardData.value.ads.status === 'synced') return 'green'
-  if (dashboardData.value.ads.status === 'cached') return 'gold'
-  return 'warning'
 })
 const marketStatusText = computed(() => {
   if (isMarketSyncing.value) return '采样中'
@@ -295,29 +314,11 @@ const marketStatusColor = computed(() => {
   if (marketData.value.status === 'partial') return 'gold'
   return 'warning'
 })
-const topMarketKeyword = computed<MarketKeywordEntry>(() => marketData.value.keywords[0] ?? {
-  keyword: '',
-  score: 0,
-  listingCount: 0,
-  tagUses: 0,
-  titleUses: 0,
-  sourceSeedCount: 0,
-  sourceSeeds: [],
-  sampleTitles: [],
-  searchUrl: '',
-})
-const topMarketSeed = computed<MarketSeedReport>(() => marketData.value.seedReports[0] ?? {
-  keyword: '',
-  resultCount: 0,
-  sampleSize: 0,
-  avgPrice: 0,
-  minPrice: 0,
-  maxPrice: 0,
-  searchUrl: '',
-  topTags: [],
-})
 const topMarketKeywords = computed(() => marketData.value.keywords.slice(0, 30))
-const topMarketSeeds = computed(() => marketData.value.seedReports.slice(0, 8))
+const visibleMarketKeywords = computed(() => isMarketRankingExpanded.value
+  ? topMarketKeywords.value
+  : topMarketKeywords.value.slice(0, MARKET_RANKING_PREVIEW_SIZE))
+const hasMoreMarketKeywords = computed(() => topMarketKeywords.value.length > MARKET_RANKING_PREVIEW_SIZE)
 
 const columns = [
   { title: '日期', key: 'date', dataIndex: 'date' },
@@ -345,7 +346,8 @@ async function loadAdDashboard(endDate = selectedDataDate.value) {
   try {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
-    selectedDataDate.value = data.selectedDate || data.latestDate
+    const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
+    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : '广告报表同步失败'
@@ -369,7 +371,7 @@ async function loadMarketKeywords(force = false) {
 }
 
 onMounted(() => {
-  void loadAdDashboard()
+  void loadAdDashboard(selectedDataDate.value)
   void loadMarketKeywords()
 })
 
@@ -378,16 +380,128 @@ watch(selectedDataDate, (date, oldDate) => {
   void loadAdDashboard(date)
 })
 
+watch(selectedMonthScope, (scope, oldScope) => {
+  if (!scope || scope === oldScope) return
+  const nextDate = defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
+  if (nextDate === selectedDataDate.value) {
+    void loadAdDashboard(nextDate)
+    return
+  }
+  selectedDataDate.value = nextDate
+})
+
 watch(marketScope, (scope) => {
+  isMarketRankingExpanded.value = false
   marketData.value = createFallbackMarketKeywords(scope)
   marketError.value = ''
   void loadMarketKeywords()
 })
 
 function formatTrendAxisLabel(item: { label: string; rangeLabel?: string }) {
-  if (selectedPeriod.value === 'day' || !item.rangeLabel?.includes(' - ')) return item.label
+  if (!item.rangeLabel?.includes(' - ')) return item.label
   const [start, end] = item.rangeLabel.split(' - ')
   return `${start.slice(5).replace('-', '/')}-${end.slice(5).replace('-', '/')}`
+}
+
+function parseUtcDateKey(value: string) {
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return new Date()
+  return new Date(Date.UTC(year, month - 1, day))
+}
+
+function formatUtcDateKey(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date: Date, days: number) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000)
+}
+
+function startOfUtcWeek(date: Date) {
+  const day = date.getUTCDay() || 7
+  return addUtcDays(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())), 1 - day)
+}
+
+function monthScopeValue(dateKey: string) {
+  const date = parseUtcDateKey(dateKey)
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  return `${date.getUTCFullYear()}-${month}`
+}
+
+function monthScopeLabel(value: string) {
+  const [year, month] = value.split('-')
+  return `${year}年${Number(month)}月`
+}
+
+function weekEndDateKey(dateKey: string) {
+  return formatUtcDateKey(addUtcDays(startOfUtcWeek(parseUtcDateKey(dateKey)), 6))
+}
+
+function buildMonthScopeOptions(latestDate: string) {
+  const latest = parseUtcDateKey(latestDate)
+  const year = latest.getUTCFullYear()
+  const latestMonth = latest.getUTCMonth()
+  const monthOptions = Array.from({ length: latestMonth + 1 }, (_, index) => {
+    const monthIndex = latestMonth - index
+    const value = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+
+    return {
+      label: monthScopeLabel(value),
+      value,
+    }
+  })
+
+  return [
+    { label: 'Year to Date', value: 'ytd' },
+    ...monthOptions,
+  ]
+}
+
+function monthWeekStarts(scope: string, latestDate: string) {
+  const [year, month] = scope.split('-').map(Number)
+  const latestWeekStart = startOfUtcWeek(parseUtcDateKey(latestDate))
+  const monthStart = new Date(Date.UTC(year, month - 1, 1))
+  const nextMonthStart = new Date(Date.UTC(year, month, 1))
+  const firstWeekStart = startOfUtcWeek(monthStart)
+  const starts: Date[] = []
+
+  for (let start = firstWeekStart; start < nextMonthStart; start = addUtcDays(start, 7)) {
+    if (start.getUTCMonth() !== month - 1) continue
+    if (start > latestWeekStart) continue
+    starts.push(start)
+  }
+
+  return starts
+}
+
+function buildWeekOptions(scope: string, latestDate: string) {
+  if (scope === 'ytd') {
+    return [{ label: '年初至今', value: latestDate }]
+  }
+
+  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
+    const end = addUtcDays(start, 6)
+
+    return {
+      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+      value: formatUtcDateKey(end),
+    }
+  })
+}
+
+function defaultWeekEndForScope(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+}
+
+function sumAdSpendBetween(start: Date, end: Date) {
+  const startKey = formatUtcDateKey(start)
+  const endKey = formatUtcDateKey(end)
+  const spend = allAdRows.value
+    .filter((row) => row.date >= startKey && row.date <= endKey)
+    .reduce((sum, row) => sum + Number(row.spend || 0), 0)
+
+  return Number(spend.toFixed(2))
 }
 
 const adTrendOption = computed(() => ({

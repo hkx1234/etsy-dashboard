@@ -16,8 +16,9 @@ export function createFallbackEtsyReviews(): EtsyReviewResponse {
     rows: [],
     products: [],
     periods: {
-      week: createEmptyReviewPeriod('week', '最近7天', '最近7天评价概览'),
-      month: createEmptyReviewPeriod('month', '最近30天', '最近30天评价概览'),
+      week: createEmptyReviewPeriod('week', '自然周', '自然周评价概览'),
+      month: createEmptyReviewPeriod('month', '统计月份', '统计月份评价概览'),
+      ytd: createEmptyReviewPeriod('ytd', 'Year to Date', 'Year to Date 评价概览'),
       all: createEmptyReviewPeriod('all', '全部评价', '全部评价概览'),
     },
     files: [],
@@ -30,7 +31,7 @@ export function createFallbackEtsyReviews(): EtsyReviewResponse {
   }
 }
 
-function createEmptyReviewPeriod(key: 'week' | 'month' | 'all', label: string, title: string) {
+function createEmptyReviewPeriod(key: 'week' | 'month' | 'ytd' | 'all', label: string, title: string) {
   return {
     key,
     label,
@@ -51,9 +52,10 @@ function createEmptyReviewPeriod(key: 'week' | 'month' | 'all', label: string, t
   }
 }
 
-export async function fetchEtsyReviews(options: { force?: boolean } = {}): Promise<EtsyReviewResponse> {
+export async function fetchEtsyReviews(options: { force?: boolean; endDate?: string } = {}): Promise<EtsyReviewResponse> {
   const etsyApiUrl = new URL('/etsy-api/review-data', window.location.origin)
   if (options.force) etsyApiUrl.searchParams.set('force', '1')
+  if (options.endDate) etsyApiUrl.searchParams.set('endDate', options.endDate)
 
   const response = await authFetch(etsyApiUrl, { cache: 'no-store' })
   const data = await parseJsonResponse<EtsyReviewResponse>(response, 'Etsy 评价同步失败')

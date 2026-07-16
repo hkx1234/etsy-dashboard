@@ -25,6 +25,8 @@ const DEFAULT_AD_REPORT_DIR = '/Volumes/汇总/广告报表'
 const RUNTIME_DATA_DIR = path.resolve(process.env.RUNTIME_DATA_DIR || path.join(__dirname, 'data'))
 const DASHBOARD_TIME_ZONE = process.env.DASHBOARD_TIME_ZONE || 'Asia/Shanghai'
 const DASHBOARD_CACHE_TTL_MS = Number(process.env.DASHBOARD_CACHE_TTL_MS || 5 * 60 * 1000)
+const USD_CNY_RATE_TTL_MS = Number(process.env.USD_CNY_RATE_TTL_MS || 6 * 60 * 60 * 1000)
+const FALLBACK_USD_CNY_RATE = Number(process.env.USD_CNY_RATE || 7.2)
 const DEFAULT_LOGISTICS_FEES_API_URL = 'https://kaixue.app.n8n.cloud/webhook/logistics-fees/latest'
 const ETSY_PROXY_URL = String(process.env.ETSY_PROXY_URL || '').trim()
 const etsyProxyDispatcher = ETSY_PROXY_URL ? new ProxyAgent(ETSY_PROXY_URL) : null
@@ -52,6 +54,7 @@ const marketKeywordCache = new Map()
 const marketKeywordBuilds = new Map()
 const financeCache = new Map()
 const financeBuilds = new Map()
+let usdCnyRateCache = null
 let authPool = null
 let authDbReady = null
 let etsyTokenRefresh = null
@@ -1489,6 +1492,10 @@ function startOfMonth(date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
 }
 
+function startOfYear(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), 0, 1))
+}
+
 function isInRange(item, start, end) {
   const createdAt = timestampMs(item)
   return createdAt >= start.getTime() && createdAt < end.getTime()
@@ -2785,21 +2792,116 @@ function buildDayTrends(listings, receipts, adRows, logisticsRows, endDate) {
 }
 
 function buildWeekTrends(listings, receipts, adRows, logisticsRows, endDate) {
+  const currentWeekStart = startOfWeek(endDate)
+
   return Array.from({ length: 5 }, (_, index) => {
-    const start = addDays(endDate, (index - 4) * 7 - 6)
+    const start = addDays(currentWeekStart, (index - 4) * 7)
     return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, logisticsRows, start, addDays(start, 7))
   })
 }
 
 function buildMonthTrends(listings, receipts, adRows, logisticsRows, endDate) {
+  const currentMonthStart = startOfMonth(endDate)
+
   return Array.from({ length: 6 }, (_, index) => {
-    const start = addDays(endDate, (index - 5) * 30 - 29)
-    return buildTrendItem(shortDateLabel(start), listings, receipts, adRows, logisticsRows, start, addDays(start, 30))
+    const start = addMonths(currentMonthStart, index - 5)
+    return buildTrendItem(monthLabel(start), listings, receipts, adRows, logisticsRows, start, addMonths(start, 1))
+  })
+}
+
+function buildYearToDateTrends(listings, receipts, adRows, logisticsRows, endDate) {
+  const yearStart = startOfYear(endDate)
+  const currentMonth = endDate.getUTCMonth()
+
+  return Array.from({ length: currentMonth + 1 }, (_, index) => {
+    const start = addMonths(yearStart, index)
+    const end = index === currentMonth ? addDays(endDate, 1) : addMonths(start, 1)
+    return buildTrendItem(monthLabel(start), listings, receipts, adRows, logisticsRows, start, end)
   })
 }
 
 function metric(key, title, value, note, tone) {
   return { key, title, value, note, tone }
+}
+
+function comparisonValue(currentValue, previousValue) {
+  const current = Number(currentValue || 0)
+  const previous = Number(previousValue || 0)
+  const change = Number((current - previous).toFixed(2))
+  const percentChange = previous === 0
+    ? current === 0
+      ? 0
+      : null
+    : Number(((change / Math.abs(previous)) * 100).toFixed(1))
+
+  return {
+    current: Number(current.toFixed(2)),
+    previous: Number(previous.toFixed(2)),
+    change,
+    percentChange,
+  }
+}
+
+function aggregateComparisonMetrics(listings, receipts, adRows, logisticsRows, start, end) {
+  const receiptMetrics = aggregateReceipts(receipts, start, end)
+  const adMetrics = aggregateAds(adRows, start, end)
+  const logisticsMetrics = aggregateLogisticsFees(logisticsRows, start, end)
+
+  return {
+    listings: countListingsCreatedInRange(listings, start, end),
+    orders: receiptMetrics.orders,
+    revenue: receiptMetrics.revenue,
+    adSpend: adMetrics.spend,
+    adRevenue: adMetrics.revenue,
+    logistics: logisticsMetrics.totalAmount,
+  }
+}
+
+function buildDashboardComparisons({ listings, receipts, adRows, logisticsRows, weekStart, weekEnd, latestDate }) {
+  const latestExclusive = addDays(latestDate, 1)
+  const effectiveWeekEnd = new Date(Math.min(weekEnd.getTime(), latestExclusive.getTime()))
+  const elapsedWeekDays = Math.max(1, Math.round((effectiveWeekEnd.getTime() - weekStart.getTime()) / DAY_MS))
+  const previousWeekStart = addDays(weekStart, -7)
+  const previousWeekEnd = addDays(previousWeekStart, elapsedWeekDays)
+
+  const selectedMonthStart = startOfMonth(weekStart)
+  const selectedMonthEnd = addMonths(selectedMonthStart, 1)
+  const effectiveMonthEnd = new Date(Math.min(effectiveWeekEnd.getTime(), selectedMonthEnd.getTime()))
+  const elapsedMonthDays = Math.max(1, Math.round((effectiveMonthEnd.getTime() - selectedMonthStart.getTime()) / DAY_MS))
+  const previousMonthStart = addMonths(selectedMonthStart, -1)
+  const previousMonthEnd = new Date(Math.min(addDays(previousMonthStart, elapsedMonthDays).getTime(), selectedMonthStart.getTime()))
+
+  const weekCurrent = aggregateComparisonMetrics(listings, receipts, adRows, logisticsRows, weekStart, effectiveWeekEnd)
+  const weekPrevious = aggregateComparisonMetrics(listings, receipts, adRows, logisticsRows, previousWeekStart, previousWeekEnd)
+  const monthCurrent = aggregateComparisonMetrics(listings, receipts, adRows, logisticsRows, selectedMonthStart, effectiveMonthEnd)
+  const monthPrevious = aggregateComparisonMetrics(listings, receipts, adRows, logisticsRows, previousMonthStart, previousMonthEnd)
+
+  const comparisonMetric = (key, title, format, unit, tone) => ({
+    key,
+    title,
+    format,
+    unit,
+    tone,
+    week: comparisonValue(weekCurrent[key], weekPrevious[key]),
+    month: comparisonValue(monthCurrent[key], monthPrevious[key]),
+  })
+
+  return {
+    weekLabel: elapsedWeekDays < 7 ? '较上周同期' : '较上一自然周',
+    monthLabel: '较上月同期',
+    weekRangeLabel: `${dateKey(weekStart)} - ${dateKey(addDays(effectiveWeekEnd, -1))}`,
+    previousWeekRangeLabel: `${dateKey(previousWeekStart)} - ${dateKey(addDays(previousWeekEnd, -1))}`,
+    monthRangeLabel: `${dateKey(selectedMonthStart)} - ${dateKey(addDays(effectiveMonthEnd, -1))}`,
+    previousMonthRangeLabel: `${dateKey(previousMonthStart)} - ${dateKey(addDays(previousMonthEnd, -1))}`,
+    metrics: [
+      comparisonMetric('listings', '上架产品', 'number', '个', 'blue'),
+      comparisonMetric('orders', '订单', 'number', '单', 'green'),
+      comparisonMetric('revenue', '订单收入', 'usd', '', 'green'),
+      comparisonMetric('adSpend', '广告花费', 'usd', '', 'amber'),
+      comparisonMetric('adRevenue', '广告销售额', 'usd', '', 'blue'),
+      comparisonMetric('logistics', '物流费用', 'cny', '', 'amber'),
+    ],
+  }
 }
 
 function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipts, transactions, imageMap, adRows, logisticsRows, start, end, trends }) {
@@ -2811,14 +2913,23 @@ function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipt
   const favorites = sumListingFavorites(listings)
   const views = sumListingViews(listings)
   const newListings = countListingsCreatedInRange(listings, start, end)
-  const periodName = key === 'week' ? '最近7天' : key === 'day' ? '单日' : '最近30天'
+  const periodName =
+    key === 'week'
+      ? '自然周'
+      : key === 'month'
+        ? '本月'
+        : key === 'ytd'
+          ? '年初至今'
+          : '单日'
   const bestProductTitle = `${periodName}最佳出品`
   const trendTitle =
     key === 'day'
       ? '最近7天每日趋势'
       : key === 'week'
-        ? '近5个7天周期对比'
-        : '近6个30天周期对比'
+        ? '近5个自然周对比'
+        : key === 'ytd'
+          ? 'Year to Date 月度趋势'
+          : '近6个月对比'
   const nonAdOrders = Math.max(receiptMetrics.orders - adMetrics.orders, 0)
   const nonAdRevenue = Math.max(receiptMetrics.revenue - adMetrics.revenue, 0)
 
@@ -2872,6 +2983,7 @@ function buildPeriodDashboard({ key, label, title, rangeLabel, listings, receipt
 async function etsyFetchAll(apiPath, fileName, options = {}) {
   const limit = Number(options.limit || 100)
   const maxPages = Number(options.maxPages || 10)
+  const skipCache = Boolean(options.skipCache)
   let offset = 0
   let count = null
   const rows = []
@@ -2890,10 +3002,10 @@ async function etsyFetchAll(apiPath, fileName, options = {}) {
     }
 
     const payload = { count: count ?? rows.length, results: rows, __source: 'live' }
-    await writeJson(fileName, payload)
+    if (fileName && !skipCache) await writeJson(fileName, payload)
     return payload
   } catch (error) {
-    const cached = await readOptionalJson(fileName, null)
+    const cached = fileName && !skipCache ? await readOptionalJson(fileName, null) : null
     if (cached) {
       console.warn(`[etsy api cache] ${fileName} 使用上次 Etsy API 缓存:`, error.message)
       return {
@@ -2979,8 +3091,11 @@ async function buildDashboardData(endDateValue) {
   const endDate = parseDateKey(selectedDate, startOfDay(new Date()))
 
   const dayStart = endDate
-  const weekStart = addDays(endDate, -6)
-  const monthStart = addDays(endDate, -29)
+  const weekStart = startOfWeek(endDate)
+  const weekEnd = addDays(weekStart, 7)
+  const monthStart = startOfMonth(endDate)
+  const yearStart = startOfYear(endDate)
+  const monthEnd = addDays(endDate, 1)
 
   const day = buildPeriodDashboard({
     key: 'day',
@@ -2999,9 +3114,9 @@ async function buildDashboardData(endDateValue) {
   })
   const week = buildPeriodDashboard({
     key: 'week',
-    label: '最近7天',
-    title: '最近7天经营总览',
-    rangeLabel: `${dateKey(weekStart)} - ${selectedDate}`,
+    label: '自然周',
+    title: '自然周经营总览',
+    rangeLabel: `${dateKey(weekStart)} - ${dateKey(addDays(weekEnd, -1))}`,
     listings,
     receipts,
     transactions,
@@ -3009,13 +3124,22 @@ async function buildDashboardData(endDateValue) {
     adRows,
     logisticsRows,
     start: weekStart,
-    end: addDays(weekStart, 7),
+    end: weekEnd,
     trends: buildWeekTrends(listings, receipts, adRows, logisticsRows, endDate),
+  })
+  week.period.comparisons = buildDashboardComparisons({
+    listings,
+    receipts,
+    adRows,
+    logisticsRows,
+    weekStart,
+    weekEnd,
+    latestDate: parseDateKey(latestDate, endDate),
   })
   const month = buildPeriodDashboard({
     key: 'month',
-    label: '最近30天',
-    title: '最近30天经营总览',
+    label: '本月',
+    title: '本月经营总览',
     rangeLabel: `${dateKey(monthStart)} - ${selectedDate}`,
     listings,
     receipts,
@@ -3024,15 +3148,32 @@ async function buildDashboardData(endDateValue) {
     adRows,
     logisticsRows,
     start: monthStart,
-    end: addDays(endDate, 1),
+    end: monthEnd,
     trends: buildMonthTrends(listings, receipts, adRows, logisticsRows, endDate),
   })
+  const ytd = buildPeriodDashboard({
+    key: 'ytd',
+    label: 'Year to Date',
+    title: 'Year to Date 经营总览',
+    rangeLabel: `${dateKey(yearStart)} - ${selectedDate}`,
+    listings,
+    receipts,
+    transactions,
+    imageMap,
+    adRows,
+    logisticsRows,
+    start: yearStart,
+    end: monthEnd,
+    trends: buildYearToDateTrends(listings, receipts, adRows, logisticsRows, endDate),
+  })
   const adDay = aggregateAds(adRows, dayStart, addDays(dayStart, 1))
-  const adWeek = aggregateAds(adRows, weekStart, addDays(weekStart, 7))
-  const adMonth = aggregateAds(adRows, monthStart, addDays(endDate, 1))
+  const adWeek = aggregateAds(adRows, weekStart, weekEnd)
+  const adMonth = aggregateAds(adRows, monthStart, monthEnd)
+  const adYtd = aggregateAds(adRows, yearStart, monthEnd)
   const logisticsDay = aggregateLogisticsFees(logisticsRows, dayStart, addDays(dayStart, 1))
-  const logisticsWeek = aggregateLogisticsFees(logisticsRows, weekStart, addDays(weekStart, 7))
-  const logisticsMonth = aggregateLogisticsFees(logisticsRows, monthStart, addDays(endDate, 1))
+  const logisticsWeek = aggregateLogisticsFees(logisticsRows, weekStart, weekEnd)
+  const logisticsMonth = aggregateLogisticsFees(logisticsRows, monthStart, monthEnd)
+  const logisticsYtd = aggregateLogisticsFees(logisticsRows, yearStart, monthEnd)
   const isSetupMissing = syncSource === 'setup-missing'
   const syncStatus = isSetupMissing ? 'cached' : syncSource === 'cache' ? 'cached' : 'synced'
   const syncLatestFile = isSetupMissing
@@ -3066,11 +3207,13 @@ async function buildDashboardData(endDateValue) {
       day: day.period,
       week: week.period,
       month: month.period,
+      ytd: ytd.period,
     },
     products: {
       day: day.products,
       week: week.products,
       month: month.products,
+      ytd: ytd.products,
     },
     fulfillment,
     ads: {
@@ -3086,6 +3229,7 @@ async function buildDashboardData(endDateValue) {
         day: adDay,
         week: adWeek,
         month: adMonth,
+        ytd: adYtd,
       },
     },
     logistics: {
@@ -3099,6 +3243,7 @@ async function buildDashboardData(endDateValue) {
         day: logisticsDay,
         week: logisticsWeek,
         month: logisticsMonth,
+        ytd: logisticsYtd,
       },
     },
     sync: {
@@ -3238,10 +3383,83 @@ function financeRowsInRange(rows, start, end) {
   })
 }
 
-function summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end) {
+function fallbackUsdCnyRate(reason = '') {
+  return {
+    base: 'USD',
+    quote: 'CNY',
+    rate: Number(FALLBACK_USD_CNY_RATE || 7.2),
+    updatedAt: new Date().toISOString(),
+    source: reason ? `fallback:${reason}` : 'fallback',
+    isFallback: true,
+  }
+}
+
+async function fetchUsdCnyExchangeRate() {
+  const envRate = Number(process.env.USD_CNY_RATE || 0)
+  if (envRate > 0) {
+    return {
+      base: 'USD',
+      quote: 'CNY',
+      rate: Number(envRate.toFixed(4)),
+      updatedAt: new Date().toISOString(),
+      source: 'env:USD_CNY_RATE',
+      isFallback: false,
+    }
+  }
+
+  const now = Date.now()
+  if (usdCnyRateCache && now - usdCnyRateCache.cachedAt < USD_CNY_RATE_TTL_MS) {
+    return usdCnyRateCache.value
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8000)
+
+  try {
+    const response = await fetch('https://open.er-api.com/v6/latest/USD', {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+    const payload = await response.json()
+    const rate = Number(payload?.rates?.CNY || 0)
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error('missing CNY rate')
+
+    const value = {
+      base: 'USD',
+      quote: 'CNY',
+      rate: Number(rate.toFixed(4)),
+      updatedAt: payload?.time_last_update_utc || new Date().toISOString(),
+      source: 'open.er-api.com',
+      isFallback: false,
+    }
+
+    usdCnyRateCache = { cachedAt: now, value }
+    return value
+  } catch (error) {
+    const value = usdCnyRateCache?.value || fallbackUsdCnyRate(error.message)
+    if (!usdCnyRateCache) usdCnyRateCache = { cachedAt: now, value }
+    return value
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function logisticsCostToUsd(amount, currency, exchangeRate) {
+  const value = Number(amount || 0)
+  const normalizedCurrency = String(currency || 'CNY').toUpperCase()
+  const rate = Number(exchangeRate?.rate || FALLBACK_USD_CNY_RATE || 7.2)
+  if (!value) return 0
+  if (normalizedCurrency === 'USD') return Number(value.toFixed(2))
+  return Number((value / rate).toFixed(2))
+}
+
+function summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end, exchangeRate = fallbackUsdCnyRate()) {
   const rows = financeRowsInRange(ledgerRows, start, end)
   const adMetrics = aggregateAds(adRows, start, end)
   const logisticsMetrics = aggregateLogisticsFees(logisticsRows, start, end)
+  const logisticsCostUsd = logisticsCostToUsd(logisticsMetrics.totalAmount, logisticsMetrics.currency, exchangeRate)
   const totals = {
     orderGross: 0,
     paymentFees: 0,
@@ -3251,12 +3469,19 @@ function summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end) {
     ledgerAdSpend: 0,
     adSpend: Number(adMetrics.spend || 0),
     logisticsCost: logisticsMetrics.totalAmount,
+    logisticsCostUsd,
     logisticsOrders: logisticsMetrics.orders,
     logisticsCurrency: logisticsMetrics.currency,
+    usdCnyRate: Number(exchangeRate.rate || FALLBACK_USD_CNY_RATE || 7.2),
+    exchangeRateSource: exchangeRate.source || 'fallback',
+    exchangeRateUpdatedAt: exchangeRate.updatedAt || '',
+    exchangeRateIsFallback: Boolean(exchangeRate.isFallback),
     disbursements: 0,
     other: 0,
     ledgerNetChangeExcludingDisbursement: 0,
     estimatedProfitExcludingLogistics: 0,
+    estimatedProfit: 0,
+    profitMargin: 0,
     orders: 0,
     ledgerRows: rows.length,
     currency: rows.find((row) => row.currency)?.currency || 'USD',
@@ -3290,6 +3515,10 @@ function summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end) {
   totals.etsyFees = totals.paymentFees + totals.listingFees
   totals.orders = paymentIds.size
   totals.estimatedProfitExcludingLogistics = totals.orderGross - totals.etsyFees - totals.taxes - totals.adSpend
+  totals.estimatedProfit = totals.estimatedProfitExcludingLogistics - totals.logisticsCostUsd
+  totals.profitMargin = totals.orderGross > 0
+    ? (totals.estimatedProfit / totals.orderGross) * 100
+    : 0
 
   for (const key of Object.keys(totals)) {
     if (typeof totals[key] === 'number') totals[key] = Number(totals[key].toFixed(2))
@@ -3302,12 +3531,12 @@ function buildFinanceMetric(key, title, value, note, tone = 'blue') {
   return { key, title, value, note, tone }
 }
 
-function buildFinanceTrend(ledgerRows, adRows, logisticsRows, start, end) {
+function buildFinanceTrend(ledgerRows, adRows, logisticsRows, start, end, exchangeRate) {
   const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS))
   return Array.from({ length: days }, (_, index) => {
     const dayStart = addDays(start, index)
     const dayEnd = addDays(dayStart, 1)
-    const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, dayStart, dayEnd)
+    const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, dayStart, dayEnd, exchangeRate)
     return {
       label: shortDateLabel(dayStart),
       rangeLabel: dateKey(dayStart),
@@ -3316,10 +3545,73 @@ function buildFinanceTrend(ledgerRows, adRows, logisticsRows, start, end) {
       taxes: summary.taxes,
       adSpend: summary.adSpend,
       logisticsCost: summary.logisticsCost,
+      logisticsCostUsd: summary.logisticsCostUsd,
       estimatedProfitExcludingLogistics: summary.estimatedProfitExcludingLogistics,
+      estimatedProfit: summary.estimatedProfit,
       orders: summary.orders,
     }
   })
+}
+
+function buildFinanceMonthlyTrend(ledgerRows, adRows, logisticsRows, start, end, exchangeRate) {
+  const months = []
+
+  for (let monthStart = startOfMonth(start); monthStart < end; monthStart = addMonths(monthStart, 1)) {
+    const monthEnd = new Date(Math.min(addMonths(monthStart, 1).getTime(), end.getTime()))
+    const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, monthStart, monthEnd, exchangeRate)
+
+    months.push({
+      label: monthLabel(monthStart),
+      rangeLabel: `${dateKey(monthStart)} - ${dateKey(addDays(monthEnd, -1))}`,
+      orderGross: summary.orderGross,
+      etsyFees: summary.etsyFees,
+      taxes: summary.taxes,
+      adSpend: summary.adSpend,
+      logisticsCost: summary.logisticsCost,
+      logisticsCostUsd: summary.logisticsCostUsd,
+      estimatedProfitExcludingLogistics: summary.estimatedProfitExcludingLogistics,
+      estimatedProfit: summary.estimatedProfit,
+      orders: summary.orders,
+    })
+  }
+
+  return months
+}
+
+function financeComparisonValue(currentValue, previousValue) {
+  const current = Number(currentValue || 0)
+  const previous = Number(previousValue || 0)
+  const change = Number((current - previous).toFixed(2))
+  const percentChange = previous === 0
+    ? current === 0
+      ? 0
+      : null
+    : Number(((change / Math.abs(previous)) * 100).toFixed(1))
+
+  return {
+    current: Number(current.toFixed(2)),
+    previous: Number(previous.toFixed(2)),
+    change,
+    percentChange,
+  }
+}
+
+function buildFinanceOrderGrossComparison({ ledgerRows, adRows, logisticsRows, weekStart, weekEnd, latestDate, exchangeRate }) {
+  const latestExclusive = addDays(latestDate, 1)
+  const effectiveWeekEnd = new Date(Math.min(weekEnd.getTime(), latestExclusive.getTime()))
+  const safeCurrentEnd = effectiveWeekEnd > weekStart ? effectiveWeekEnd : addDays(weekStart, 1)
+  const elapsedWeekDays = Math.max(1, Math.round((safeCurrentEnd.getTime() - weekStart.getTime()) / DAY_MS))
+  const previousWeekStart = addDays(weekStart, -7)
+  const previousWeekEnd = addDays(previousWeekStart, elapsedWeekDays)
+  const current = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, weekStart, safeCurrentEnd, exchangeRate).orderGross
+  const previous = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, previousWeekStart, previousWeekEnd, exchangeRate).orderGross
+
+  return {
+    label: elapsedWeekDays < 7 ? '较上个自然周同期' : '较上个自然周',
+    currentRangeLabel: `${dateKey(weekStart)} - ${dateKey(addDays(safeCurrentEnd, -1))}`,
+    previousRangeLabel: `${dateKey(previousWeekStart)} - ${dateKey(addDays(previousWeekEnd, -1))}`,
+    ...financeComparisonValue(current, previous),
+  }
 }
 
 function buildFinanceBreakdown(summary) {
@@ -3456,7 +3748,10 @@ function normalizeFinanceOrderRows(payments, ledgerRows, logisticsRows, start, e
         logisticsCurrency: logisticsFee?.currency || 'CNY',
         logisticsWeight: logisticsFee?.weight || 0,
         logisticsTrackingNo: logisticsFee?.trackingNo || '',
+        logisticsTrackingNos: logisticsFee?.trackingNos || [],
         logisticsReceivedAt: logisticsFee?.receivedAt || '',
+        logisticsShippingMethod: logisticsFee?.shippingMethod || '',
+        logisticsCountry: logisticsFee?.country || '',
       }
     })
     .sort((a, b) => b.date.localeCompare(a.date) || Number(b.receiptId) - Number(a.receiptId))
@@ -3500,16 +3795,78 @@ async function fetchFinancePayments(shopId, paymentIds) {
   }
 }
 
-async function fetchFinanceSourceData(endDate) {
+const FINANCE_LEDGER_MAX_WINDOW_DAYS = 31
+
+function financeLedgerRowKey(row) {
+  const entryId = String(row?.entry_id || '')
+  if (entryId) return `entry:${entryId}`
+  const ledgerId = String(row?.ledger_id || '')
+  if (ledgerId) return `ledger:${ledgerId}`
+  return [
+    row?.create_date || row?.created_timestamp || row?.date || '',
+    row?.ledger_type || '',
+    row?.reference_type || '',
+    row?.reference_id || '',
+    row?.amount?.amount || row?.amount || '',
+    row?.currency || row?.amount?.currency_code || '',
+  ].join('|')
+}
+
+async function fetchFinanceLedgerPayload(shopId, endDate, startDate) {
+  const rangeStart = startDate || addDays(endDate, -29)
+  const rangeEndExclusive = addDays(endDate, 1)
+  const rows = []
+
+  if (rangeStart >= rangeEndExclusive) {
+    const payload = { count: 0, results: [], __source: 'live' }
+    await writeJson('etsy-ledger.json', payload)
+    return payload
+  }
+
+  try {
+    for (let cursor = new Date(rangeStart); cursor < rangeEndExclusive;) {
+      const chunkEnd = new Date(Math.min(
+        addDays(cursor, FINANCE_LEDGER_MAX_WINDOW_DAYS).getTime(),
+        rangeEndExclusive.getTime(),
+      ))
+      const minCreated = Math.floor(cursor.getTime() / 1000)
+      const maxCreated = Math.floor(chunkEnd.getTime() / 1000)
+      const apiPath = `/shops/${shopId}/payment-account/ledger-entries?min_created=${minCreated}&max_created=${maxCreated}`
+      const chunkPayload = await etsyFetchAll(apiPath, null, { limit: 100, maxPages: 50, skipCache: true })
+
+      rows.push(...getResults(chunkPayload))
+      if (chunkEnd <= cursor) break
+      cursor = chunkEnd
+    }
+
+    const seen = new Set()
+    const dedupedRows = rows.filter((row) => {
+      const key = financeLedgerRowKey(row)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    const payload = { count: dedupedRows.length, results: dedupedRows, __source: 'live' }
+    await writeJson('etsy-ledger.json', payload)
+    return payload
+  } catch (error) {
+    const cached = await readOptionalJson('etsy-ledger.json', null)
+    if (cached) {
+      console.warn('[etsy api cache] etsy-ledger.json 使用上次 Etsy API 缓存:', error.message)
+      return {
+        ...cached,
+        __source: 'cache',
+        __cacheReason: error.message,
+      }
+    }
+    throw error
+  }
+}
+
+async function fetchFinanceSourceData(endDate, startDate) {
   try {
     const shopId = await getSavedShopId()
-    const minCreated = Math.floor(addDays(endDate, -29).getTime() / 1000)
-    const maxCreated = Math.floor(addDays(endDate, 1).getTime() / 1000)
-    const ledgerPayload = await etsyFetchAll(
-      `/shops/${shopId}/payment-account/ledger-entries?min_created=${minCreated}&max_created=${maxCreated}`,
-      'etsy-ledger.json',
-      { limit: 100, maxPages: 50 },
-    )
+    const ledgerPayload = await fetchFinanceLedgerPayload(shopId, endDate, startDate)
     const ledgerRows = getResults(ledgerPayload)
     const paymentIds = ledgerRows
       .filter((row) => row.reference_type === 'shop_payment' || row.reference_type === 'processing_fee')
@@ -3539,21 +3896,21 @@ async function fetchFinanceSourceData(endDate) {
   }
 }
 
-function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payments, adRows, logisticsRows, start, end }) {
-  const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end)
+function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payments, adRows, logisticsRows, start, end, comparison, exchangeRate }) {
+  const summary = summarizeFinanceLedger(ledgerRows, adRows, logisticsRows, start, end, exchangeRate)
   const orderRows = normalizeFinanceOrderRows(payments, ledgerRows, logisticsRows, start, end)
   const periodLedgerRows = normalizeFinanceLedgerRows(financeRowsInRange(ledgerRows, start, end))
   const periodLogisticsRows = normalizeFinanceLogisticsRows(logisticsRows, start, end)
   const currency = summary.currency || 'USD'
-  const periodName = key === 'day' ? '单日' : key === 'week' ? '最近7天' : '最近30天'
+  const periodName = key === 'day' ? '单日' : key === 'week' ? '自然周' : key === 'month' ? '统计月份' : 'Year to Date'
   const metricCurrency = currency
   const metrics = [
     buildFinanceMetric('gross', '订单入账', moneyText(summary.orderGross), `${numberText(summary.orders)} 笔 payment gross`, 'green'),
     buildFinanceMetric('etsyFees', 'Etsy 扣费', moneyText(summary.etsyFees), '支付/交易/上架/续费，不含广告 CSV', 'amber'),
     buildFinanceMetric('taxes', '销售税', moneyText(summary.taxes), 'Etsy 代收或相关税项', 'blue'),
     buildFinanceMetric('adSpend', '广告花费', moneyText(summary.adSpend), '来自站内广告 CSV', 'red'),
-    buildFinanceMetric('logistics', '物流费用', cnyMoneyText(summary.logisticsCost, summary.logisticsCurrency), `${numberText(summary.logisticsOrders)} 单 / 来自 n8n 物流表`, 'amber'),
-    buildFinanceMetric('profit', '估算利润', moneyText(summary.estimatedProfitExcludingLogistics), '不含物流费和商品成本', 'green'),
+    buildFinanceMetric('logistics', '物流费用', cnyMoneyText(summary.logisticsCost, summary.logisticsCurrency), `折合 ${moneyText(summary.logisticsCostUsd)} / USD-CNY ${summary.usdCnyRate.toFixed(4)}`, 'amber'),
+    buildFinanceMetric('profit', '估算利润', moneyText(summary.estimatedProfit), `利润率 ${summary.profitMargin.toFixed(1)}% / 已扣物流费，不含商品成本`, 'green'),
   ]
 
   return {
@@ -3561,11 +3918,14 @@ function buildFinancePeriod({ key, label, title, rangeLabel, ledgerRows, payment
     label,
     title,
     rangeLabel,
-    summaryText: `${periodName}订单入账 ${moneyText(summary.orderGross)}，Etsy 扣费 ${moneyText(summary.etsyFees)}，广告花费 ${moneyText(summary.adSpend)}，物流费用 ${cnyMoneyText(summary.logisticsCost, summary.logisticsCurrency)}，估算利润 ${moneyText(summary.estimatedProfitExcludingLogistics)}。`,
+    summaryText: `${periodName}订单入账 ${moneyText(summary.orderGross)}，Etsy 扣费 ${moneyText(summary.etsyFees)}，广告花费 ${moneyText(summary.adSpend)}，物流费用折合 ${moneyText(summary.logisticsCostUsd)}，估算利润 ${moneyText(summary.estimatedProfit)}。`,
     currency: metricCurrency,
     metrics,
     summary,
-    trends: buildFinanceTrend(ledgerRows, adRows, logisticsRows, key === 'month' ? start : key === 'week' ? start : addDays(end, -7), end),
+    comparison,
+    trends: key === 'ytd'
+      ? buildFinanceMonthlyTrend(ledgerRows, adRows, logisticsRows, start, end, exchangeRate)
+      : buildFinanceTrend(ledgerRows, adRows, logisticsRows, key === 'month' || key === 'week' ? start : addDays(end, -7), end, exchangeRate),
     orderRows,
     logisticsRows: periodLogisticsRows,
     ledgerRows: periodLedgerRows,
@@ -3577,23 +3937,37 @@ async function buildFinanceData(endDateValue) {
   const fallbackDate = startOfDay(new Date())
   const selectedDate = dateKey(parseDateKey(endDateValue, fallbackDate))
   const endDate = parseDateKey(selectedDate, fallbackDate)
-  const { shopId, ledgerRows, payments, syncSource, cacheReasons } = await fetchFinanceSourceData(endDate)
+  const yearStart = new Date(Date.UTC(endDate.getUTCFullYear(), 0, 1))
+  const { shopId, ledgerRows, payments, syncSource, cacheReasons } = await fetchFinanceSourceData(endDate, yearStart)
   const adReport = await fetchAdReportData()
   const adRows = adReport.rows || []
   const logisticsReport = await fetchLogisticsFeeData()
   const logisticsRows = logisticsReport.rows || []
+  const exchangeRate = await fetchUsdCnyExchangeRate()
   const ledgerDates = ledgerRows.map(financeLedgerDate).filter(Boolean).sort()
   const paymentDates = payments.map(financePaymentDate).filter(Boolean).sort()
   const adDates = adRows.map((row) => row.date).filter(Boolean).sort()
   const logisticsDates = logisticsRows.map((row) => row.date).filter(Boolean).sort()
-  const availableDates = [...new Set([...ledgerDates, ...paymentDates, ...adDates, ...logisticsDates, selectedDate])].sort()
+  const dataDates = [...new Set([...ledgerDates, ...paymentDates, ...adDates, ...logisticsDates])].sort()
+  const latestDataDate = dataDates.at(-1) || selectedDate
+  const availableDates = [...new Set([...dataDates, selectedDate])].sort()
   const latestDate = availableDates.at(-1) || selectedDate
   const dayStart = endDate
-  const weekStart = addDays(endDate, -6)
-  const monthStart = addDays(endDate, -29)
+  const weekStart = startOfWeek(endDate)
+  const monthStart = startOfMonth(endDate)
   const dayEnd = addDays(dayStart, 1)
   const weekEnd = addDays(weekStart, 7)
   const monthEnd = addDays(endDate, 1)
+  const ytdEnd = monthEnd
+  const weekComparison = buildFinanceOrderGrossComparison({
+    ledgerRows,
+    adRows,
+    logisticsRows,
+    weekStart,
+    weekEnd,
+    latestDate: parseDateKey(latestDataDate, endDate),
+    exchangeRate,
+  })
   const day = buildFinancePeriod({
     key: 'day',
     label: '按日',
@@ -3605,23 +3979,26 @@ async function buildFinanceData(endDateValue) {
     logisticsRows,
     start: dayStart,
     end: dayEnd,
+    exchangeRate,
   })
   const week = buildFinancePeriod({
     key: 'week',
-    label: '最近7天',
-    title: '最近7天财务总览',
-    rangeLabel: `${dateKey(weekStart)} - ${selectedDate}`,
+    label: '自然周',
+    title: '自然周财务总览',
+    rangeLabel: `${dateKey(weekStart)} - ${dateKey(addDays(weekEnd, -1))}`,
     ledgerRows,
     payments,
     adRows,
     logisticsRows,
     start: weekStart,
     end: weekEnd,
+    comparison: weekComparison,
+    exchangeRate,
   })
   const month = buildFinancePeriod({
     key: 'month',
-    label: '最近30天',
-    title: '最近30天财务总览',
+    label: '统计月份',
+    title: '统计月份财务总览',
     rangeLabel: `${dateKey(monthStart)} - ${selectedDate}`,
     ledgerRows,
     payments,
@@ -3629,6 +4006,20 @@ async function buildFinanceData(endDateValue) {
     logisticsRows,
     start: monthStart,
     end: monthEnd,
+    exchangeRate,
+  })
+  const ytd = buildFinancePeriod({
+    key: 'ytd',
+    label: 'Year to Date',
+    title: 'Year to Date 财务总览',
+    rangeLabel: `${dateKey(yearStart)} - ${selectedDate}`,
+    ledgerRows,
+    payments,
+    adRows,
+    logisticsRows,
+    start: yearStart,
+    end: ytdEnd,
+    exchangeRate,
   })
 
   return {
@@ -3651,6 +4042,7 @@ async function buildFinanceData(endDateValue) {
       day,
       week,
       month,
+      ytd,
     },
     sync: {
       status: syncSource === 'setup-missing' ? 'cached' : syncSource === 'cache' ? 'cached' : 'synced',
@@ -3845,6 +4237,17 @@ function buildReviewMonthlyTrends(reviews, endDate) {
   })
 }
 
+function buildReviewYearToDateTrends(reviews, endDate) {
+  const yearStart = startOfYear(endDate)
+  const currentMonth = endDate.getUTCMonth()
+
+  return Array.from({ length: currentMonth + 1 }, (_, index) => {
+    const start = addMonths(yearStart, index)
+    const end = index === currentMonth ? addDays(endDate, 1) : addMonths(start, 1)
+    return aggregateReviewTrend(reviews, monthLabel(start), start, end)
+  })
+}
+
 function buildReviewPeriod(key, label, title, reviews, start, end, trendMode) {
   const inPeriod = start && end ? reviews.filter((review) => reviewInRange(review, start, end)) : reviews
   const sortedReviews = [...inPeriod].sort((a, b) => b.createdTimestamp - a.createdTimestamp)
@@ -3874,7 +4277,9 @@ function buildReviewPeriod(key, label, title, reviews, start, end, trendMode) {
     productCount: productSummaries.length,
     ratingDistribution: distribution,
     trends:
-      trendMode === 'month'
+      trendMode === 'ytd'
+        ? buildReviewYearToDateTrends(reviews, end ? addDays(end, -1) : new Date())
+        : trendMode === 'month'
         ? buildReviewMonthlyTrends(reviews, end ? addDays(end, -1) : new Date())
         : buildReviewDailyTrends(reviews, start, Math.max(1, Math.round((end.getTime() - start.getTime()) / DAY_MS))),
     recentReviews: sortedReviews.slice(0, 40),
@@ -3956,11 +4361,15 @@ async function buildReviewData(options = {}) {
     .map((review) => normalizeReview(review, listingMap, imageMap))
     .filter((review) => review.createdTimestamp)
     .sort((a, b) => b.createdTimestamp - a.createdTimestamp)
-  const currentDateKey = dateKeyInTimeZone(new Date())
-  const endDate = addDays(parseDateKey(currentDateKey, startOfDay(new Date())), 1)
-  const weekStart = addDays(endDate, -7)
-  const monthStart = addDays(endDate, -30)
   const latestReviewDate = rows[0]?.createdDate || ''
+  const currentDateKey = options.endDate || latestReviewDate || dateKeyInTimeZone(new Date())
+  const selectedDate = parseDateKey(currentDateKey, startOfDay(new Date()))
+  const weekStart = startOfWeek(selectedDate)
+  const weekEnd = addDays(weekStart, 7)
+  const monthStart = startOfMonth(selectedDate)
+  const monthEnd = addMonths(monthStart, 1)
+  const yearStart = startOfYear(selectedDate)
+  const ytdEnd = addDays(selectedDate, 1)
 
   return {
     ok: true,
@@ -3976,8 +4385,9 @@ async function buildReviewData(options = {}) {
     rows,
     products: buildReviewProductSummaries(rows),
     periods: {
-      week: buildReviewPeriod('week', '最近7天', '最近7天评价概览', rows, weekStart, endDate, 'day'),
-      month: buildReviewPeriod('month', '最近30天', '最近30天评价概览', rows, monthStart, endDate, 'day'),
+      week: buildReviewPeriod('week', '自然周', '自然周评价概览', rows, weekStart, weekEnd, 'day'),
+      month: buildReviewPeriod('month', '统计月份', '统计月份评价概览', rows, monthStart, monthEnd, 'day'),
+      ytd: buildReviewPeriod('ytd', 'Year to Date', 'Year to Date 评价概览', rows, yearStart, ytdEnd, 'ytd'),
       all: buildReviewPeriod('all', '全部评价', '全部评价概览', rows, null, null, 'month'),
     },
     files: [
@@ -4003,7 +4413,7 @@ async function buildReviewData(options = {}) {
 }
 
 async function getReviewData(options = {}) {
-  const cacheKey = 'reviews'
+  const cacheKey = `reviews:${options.endDate || 'latest'}`
   const now = Date.now()
   const cached = reviewCache.get(cacheKey)
 
@@ -4541,6 +4951,7 @@ app.get('/etsy/finance-data', requireAuth, requireFinanceAccess, asyncRoute(asyn
 app.get('/etsy/review-data', requireAuth, requireReviewAccess, asyncRoute(async (req, res) => {
   const reviewData = await getReviewData({
     force: req.query.force === '1' || req.query.refresh === '1',
+    endDate: req.query.endDate,
   })
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.end(JSON.stringify(reviewData, null, 2))
