@@ -2451,10 +2451,14 @@ async function getListingImageMap(listings, options = {}) {
       }
     })
 
-    await writeJson('etsy-listing-images.json', {
-      updatedAt: new Date().toISOString(),
-      images,
-    })
+    try {
+      await writeJson('etsy-listing-images.json', {
+        updatedAt: new Date().toISOString(),
+        images,
+      })
+    } catch (error) {
+      console.warn('[listing image cache write error]', error.message)
+    }
   }
 
   if (missingListings.length > 0) {
@@ -3032,9 +3036,40 @@ function isMissingEtsySetupError(error) {
   )
 }
 
+function etsySyncFailureReason(error) {
+  return error?.message || 'Etsy API 本次同步失败'
+}
+
+async function readCachedDashboardSourceData(error) {
+  const [shopData, listingsPayload, receiptsPayload, transactionsPayload] = await Promise.all([
+    readOptionalJson('etsy-shops.json', null),
+    readOptionalJson('etsy-listings.json', null),
+    readOptionalJson('etsy-receipts.json', null),
+    readOptionalJson('etsy-transactions.json', null),
+  ])
+  let shop = {}
+  try {
+    if (shopData) shop = normalizeShopInfo(getFirstShop(shopData))
+  } catch {
+    shop = {}
+  }
+
+  return {
+    shop,
+    listings: getResults(listingsPayload || {}),
+    receipts: getResults(receiptsPayload || {}),
+    transactions: getResults(transactionsPayload || {}),
+    syncSource: 'cache',
+    cacheReasons: [
+      `Etsy API 本次同步失败，已改用本地缓存/空数据：${etsySyncFailureReason(error)}`,
+    ],
+  }
+}
+
 async function fetchDashboardSourceData() {
   try {
-    const shopId = await getSavedShopId()
+    const shop = await getSavedShopInfo()
+    const shopId = shop.shopId
     const [listingsPayload, receiptsPayload, transactionsPayload] = await Promise.all([
       etsyFetchAll(`/shops/${shopId}/listings/active`, 'etsy-listings.json'),
       etsyFetchAll(`/shops/${shopId}/receipts`, 'etsy-receipts.json'),
@@ -3044,6 +3079,7 @@ async function fetchDashboardSourceData() {
     const usedCache = payloads.some((payload) => payload.__source === 'cache')
 
     return {
+      shop,
       listings: getResults(listingsPayload),
       receipts: getResults(receiptsPayload),
       transactions: getResults(transactionsPayload),
@@ -3051,9 +3087,13 @@ async function fetchDashboardSourceData() {
       cacheReasons: payloads.map((payload) => payload.__cacheReason).filter(Boolean),
     }
   } catch (error) {
-    if (!isMissingEtsySetupError(error)) throw error
+    if (!isMissingEtsySetupError(error)) {
+      console.warn('[etsy api fallback] dashboard using cached source data:', error.message)
+      return readCachedDashboardSourceData(error)
+    }
     console.warn('[etsy setup missing] dashboard using empty data:', error.message)
     return {
+      shop: {},
       listings: [],
       receipts: [],
       transactions: [],
@@ -3064,7 +3104,7 @@ async function fetchDashboardSourceData() {
 }
 
 async function buildDashboardData(endDateValue) {
-  const { listings, receipts, transactions, syncSource, cacheReasons } = await fetchDashboardSourceData()
+  const { shop, listings, receipts, transactions, syncSource, cacheReasons } = await fetchDashboardSourceData()
   const adReport = await fetchAdReportData()
   const adRows = adReport.rows || []
   const logisticsReport = await fetchLogisticsFeeData()
@@ -3191,6 +3231,10 @@ async function buildDashboardData(endDateValue) {
     ok: true,
     generatedAt: new Date().toISOString(),
     sourceDir: 'Etsy Open API v3',
+    shop: {
+      shopId: String(shop?.shopId || ''),
+      shopName: shop?.shopName || '',
+    },
     availableDates: availableDates.length ? availableDates : [latestDate],
     selectedDate,
     latestDate,
@@ -3863,9 +3907,42 @@ async function fetchFinanceLedgerPayload(shopId, endDate, startDate) {
   }
 }
 
+async function readCachedFinanceSourceData(error) {
+  const [shopData, ledgerPayload, paymentsPayload] = await Promise.all([
+    readOptionalJson('etsy-shops.json', null),
+    readOptionalJson('etsy-ledger.json', null),
+    readOptionalJson('etsy-payments.json', null),
+  ])
+
+  let shopId = ''
+  let shopName = ''
+  try {
+    if (shopData) {
+      const shop = normalizeShopInfo(getFirstShop(shopData))
+      shopId = String(shop.shopId || '')
+      shopName = shop.shopName || ''
+    }
+  } catch {
+    shopId = ''
+    shopName = ''
+  }
+
+  return {
+    shopId,
+    shopName,
+    ledgerRows: getResults(ledgerPayload || {}),
+    payments: getResults(paymentsPayload || {}),
+    syncSource: 'cache',
+    cacheReasons: [
+      `Etsy 财务 API 本次同步失败，已改用本地缓存/空数据：${etsySyncFailureReason(error)}`,
+    ],
+  }
+}
+
 async function fetchFinanceSourceData(endDate, startDate) {
   try {
-    const shopId = await getSavedShopId()
+    const shop = await getSavedShopInfo()
+    const shopId = shop.shopId
     const ledgerPayload = await fetchFinanceLedgerPayload(shopId, endDate, startDate)
     const ledgerRows = getResults(ledgerPayload)
     const paymentIds = ledgerRows
@@ -3878,16 +3955,21 @@ async function fetchFinanceSourceData(endDate, startDate) {
 
     return {
       shopId,
+      shopName: shop.shopName || '',
       ledgerRows,
       payments: getResults(paymentsPayload),
       syncSource: usedCache ? 'cache' : 'live',
       cacheReasons: payloads.map((payload) => payload.__cacheReason).filter(Boolean),
     }
   } catch (error) {
-    if (!isMissingEtsySetupError(error)) throw error
+    if (!isMissingEtsySetupError(error)) {
+      console.warn('[etsy api fallback] finance using cached source data:', error.message)
+      return readCachedFinanceSourceData(error)
+    }
     console.warn('[etsy setup missing] finance using empty data:', error.message)
     return {
       shopId: '',
+      shopName: '',
       ledgerRows: [],
       payments: [],
       syncSource: 'setup-missing',
@@ -3938,7 +4020,7 @@ async function buildFinanceData(endDateValue) {
   const selectedDate = dateKey(parseDateKey(endDateValue, fallbackDate))
   const endDate = parseDateKey(selectedDate, fallbackDate)
   const yearStart = new Date(Date.UTC(endDate.getUTCFullYear(), 0, 1))
-  const { shopId, ledgerRows, payments, syncSource, cacheReasons } = await fetchFinanceSourceData(endDate, yearStart)
+  const { shopId, shopName, ledgerRows, payments, syncSource, cacheReasons } = await fetchFinanceSourceData(endDate, yearStart)
   const adReport = await fetchAdReportData()
   const adRows = adReport.rows || []
   const logisticsReport = await fetchLogisticsFeeData()
@@ -4028,6 +4110,7 @@ async function buildFinanceData(endDateValue) {
     sourceDir: 'Etsy Payments / Ledger',
     shop: {
       shopId: String(shopId || ''),
+      shopName: shopName || '',
     },
     availableDates,
     selectedDate,
@@ -4339,7 +4422,30 @@ async function fetchReviewSourceData(options = {}) {
       cacheReasons: payloads.map((payload) => payload.__cacheReason).filter(Boolean),
     }
   } catch (error) {
-    if (!isMissingEtsySetupError(error)) throw error
+    if (!isMissingEtsySetupError(error)) {
+      const cached = await readCachedReviewSourceData()
+      if (cached) {
+        console.warn('[etsy api fallback] reviews using cached source data:', error.message)
+        return {
+          ...cached,
+          cacheReasons: [
+            `Etsy 评价 API 本次同步失败，已改用本地缓存：${etsySyncFailureReason(error)}`,
+          ],
+        }
+      }
+
+      console.warn('[etsy api fallback] reviews using empty source data:', error.message)
+      return {
+        shop: {},
+        listings: [],
+        reviews: [],
+        reviewCount: 0,
+        syncSource: 'cache',
+        cacheReasons: [
+          `Etsy 评价 API 本次同步失败，且本地暂无评价缓存：${etsySyncFailureReason(error)}`,
+        ],
+      }
+    }
     console.warn('[etsy setup missing] reviews using empty data:', error.message)
     return {
       shop: {},
@@ -4462,6 +4568,18 @@ function getFirstShop(shopData) {
     throw error
   }
   return shop
+}
+
+function normalizeShopInfo(shop) {
+  return {
+    shopId: String(shop?.shop_id || ''),
+    shopName: shop?.shop_name || shop?.title || '',
+  }
+}
+
+async function getSavedShopInfo() {
+  const shopData = await readJson('etsy-shops.json')
+  return normalizeShopInfo(getFirstShop(shopData))
 }
 
 async function getSavedShopId() {

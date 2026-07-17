@@ -15,6 +15,13 @@
         </p>
       </div>
       <div class="period-controls">
+        <span>店铺</span>
+        <a-select
+          v-model:value="selectedShopScope"
+          :options="shopOptions"
+          class="period-select shop-select"
+          size="middle"
+        />
         <span>统计月份</span>
         <a-select
           v-model:value="selectedMonthScope"
@@ -221,25 +228,37 @@ use([BarChart, LineChart, GridComponent, LegendComponent, TooltipComponent, Canv
 
 const reviewFilter = ref('全部评价')
 const reviewData = ref(createFallbackEtsyReviews())
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(monthScopeValue(reviewData.value.latestReviewDate || reviewData.value.currentDate || formatUtcDateKey(new Date())))
 const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, reviewData.value.latestReviewDate || reviewData.value.currentDate || formatUtcDateKey(new Date())))
 const isSyncing = ref(false)
 const hasLoaded = ref(false)
 const syncError = ref('')
 const DAY_MS = 24 * 60 * 60 * 1000
+const ALL_WEEKS_VALUE = 'all'
 
-const selectedPeriod = computed<ReviewPeriodKey>(() => selectedMonthScope.value === 'ytd' ? 'ytd' : 'week')
+const selectedPeriod = computed<ReviewPeriodKey>(() => {
+  if (selectedMonthScope.value === 'ytd') return 'ytd'
+  if (selectedDataDate.value === ALL_WEEKS_VALUE) return 'month'
+  return 'week'
+})
 const currentPeriod = computed(() => reviewData.value.periods[selectedPeriod.value] ?? reviewData.value.periods.week)
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
+const shopOptions = computed(() => buildShopOptions(reviewData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(reviewData.value.latestReviewDate || selectedDataDate.value))
 const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, reviewData.value.latestReviewDate || selectedDataDate.value))
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, reviewData.value.latestReviewDate || reviewData.value.currentDate || formatUtcDateKey(new Date()))
+  : selectedDataDate.value)
 const reviewGoodRateSummary = computed(() => {
   const rows = reviewData.value.rows
 
-  if (selectedMonthScope.value === 'ytd') {
-    const rate = goodReviewRate(reviewsInDateRange(rows, startOfUtcYear(parseUtcDateKey(selectedDataDate.value)), addUtcDays(parseUtcDateKey(selectedDataDate.value), 1)))
+  if (selectedMonthScope.value === 'ytd' || selectedDataDate.value === ALL_WEEKS_VALUE) {
+    const end = parseUtcDateKey(requestEndDate.value)
+    const start = selectedMonthScope.value === 'ytd' ? startOfUtcYear(end) : startOfUtcMonth(end)
+    const rate = goodReviewRate(reviewsInDateRange(rows, start, addUtcDays(end, 1)))
     return {
-      text: '好评率 Year to Date',
+      text: selectedMonthScope.value === 'ytd' ? '好评率 Year to Date' : '好评率统计月份',
       value: formatPercent(rate),
       detail: '4-5 星评价占比',
       tone: 'flat',
@@ -320,10 +339,12 @@ function formatRating(value: number) {
 async function loadReviews(force = false) {
   isSyncing.value = true
   try {
-    const data = await fetchEtsyReviews({ force, endDate: selectedDataDate.value })
+    const data = await fetchEtsyReviews({ force, endDate: requestEndDate.value })
     reviewData.value = data
     const responseDate = data.currentDate || selectedDataDate.value || data.latestReviewDate
-    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? responseDate : weekEndDateKey(responseDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd' ? responseDate : weekEndDateKey(responseDate)
+    }
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : '评价同步失败'
@@ -423,6 +444,10 @@ function startOfUtcWeek(date: Date) {
   return addUtcDays(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())), 1 - day)
 }
 
+function startOfUtcMonth(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
+}
+
 function startOfUtcYear(date: Date) {
   return new Date(Date.UTC(date.getUTCFullYear(), 0, 1))
 }
@@ -449,6 +474,13 @@ function monthScopeValue(dateKey: string) {
 function monthScopeLabel(value: string) {
   const [year, month] = value.split('-')
   return `${year}年${Number(month)}月`
+}
+
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
 }
 
 function weekEndDateKey(dateKey: string) {
@@ -497,18 +529,34 @@ function buildWeekOptions(scope: string, latestDate: string) {
     return [{ label: '年初至今', value: latestDate }]
   }
 
-  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
-    const end = addUtcDays(start, 6)
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...monthWeekStarts(scope, latestDate).reverse().map((start) => {
+      const end = addUtcDays(start, 6)
 
-    return {
-      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
-      value: formatUtcDateKey(end),
-    }
-  })
+      return {
+        label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
   if (scope === 'ytd') return latestDate
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 </script>

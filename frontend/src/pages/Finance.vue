@@ -24,6 +24,13 @@
         </p>
       </div>
       <div class="period-controls">
+        <span>店铺</span>
+        <a-select
+          v-model:value="selectedShopScope"
+          :options="shopOptions"
+          class="period-select shop-select"
+          size="middle"
+        />
         <span>统计月份</span>
         <a-select
           v-model:value="selectedMonthScope"
@@ -218,6 +225,7 @@ import { formatCnyMoney, formatNumber } from '@/utils/format'
 use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 const financeData = ref(createFallbackEtsyFinance())
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(monthScopeValue(financeData.value.latestDate || financeData.value.selectedDate))
 const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, financeData.value.latestDate || financeData.value.selectedDate))
 const isSyncing = ref(false)
@@ -226,12 +234,21 @@ const syncError = ref('')
 const orderSearchQuery = ref('')
 let autoRefreshTimer: number | undefined
 const DAY_MS = 24 * 60 * 60 * 1000
+const ALL_WEEKS_VALUE = 'all'
 
-const selectedPeriod = computed<FinancePeriodKey>(() => selectedMonthScope.value === 'ytd' ? 'ytd' : 'week')
+const selectedPeriod = computed<FinancePeriodKey>(() => {
+  if (selectedMonthScope.value === 'ytd') return 'ytd'
+  if (selectedDataDate.value === ALL_WEEKS_VALUE) return 'month'
+  return 'week'
+})
 const currentFinance = computed(() => financeData.value.periods[selectedPeriod.value] ?? financeData.value.periods.week)
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
+const shopOptions = computed(() => buildShopOptions(financeData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(financeData.value.latestDate || selectedDataDate.value))
 const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, financeData.value.latestDate || selectedDataDate.value))
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, financeData.value.latestDate || financeData.value.selectedDate)
+  : selectedDataDate.value)
 const filteredOrderRows = computed(() => {
   const keyword = orderSearchQuery.value.trim().replace(/^#/, '').toLowerCase()
   if (!keyword) return currentFinance.value.orderRows
@@ -330,9 +347,9 @@ const fallbackFinanceComparison = computed(() => {
 const financeComparisonSummary = computed(() => {
   const currentGross = Number(currentFinance.value.summary.orderGross || 0)
 
-  if (selectedMonthScope.value === 'ytd') {
+  if (selectedMonthScope.value === 'ytd' || selectedDataDate.value === ALL_WEEKS_VALUE) {
     return {
-      text: '订单入账 Year to Date 累计',
+      text: selectedMonthScope.value === 'ytd' ? '订单入账 Year to Date 累计' : '订单入账统计月份累计',
       value: formatUsd(currentGross),
       detail: '',
       tone: 'flat',
@@ -393,7 +410,9 @@ async function loadFinance(endDate?: string) {
     const data = await fetchEtsyFinance(endDate)
     financeData.value = data
     const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
-    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    }
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : 'Etsy 财务 API 同步失败'
@@ -404,9 +423,9 @@ async function loadFinance(endDate?: string) {
 }
 
 onMounted(() => {
-  void loadFinance(selectedDataDate.value)
+  void loadFinance(requestEndDate.value)
   autoRefreshTimer = window.setInterval(() => {
-    void loadFinance(selectedDataDate.value)
+    void loadFinance(requestEndDate.value)
   }, 10 * 60 * 1000)
 })
 
@@ -416,14 +435,14 @@ onUnmounted(() => {
 
 watch(selectedDataDate, (date, oldDate) => {
   if (!date || !oldDate || date === oldDate) return
-  void loadFinance(date)
+  void loadFinance(requestEndDate.value)
 })
 
 watch(selectedMonthScope, (scope, oldScope) => {
   if (!scope || scope === oldScope) return
   const nextDate = defaultWeekEndForScope(scope, financeData.value.latestDate || selectedDataDate.value)
   if (nextDate === selectedDataDate.value) {
-    void loadFinance(nextDate)
+    void loadFinance(requestEndDate.value)
     return
   }
   selectedDataDate.value = nextDate
@@ -481,6 +500,13 @@ function monthScopeLabel(value: string) {
   return `${year}年${Number(month)}月`
 }
 
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
+}
+
 function weekEndDateKey(dateKey: string) {
   return formatUtcDateKey(addUtcDays(startOfUtcWeek(parseUtcDateKey(dateKey)), 6))
 }
@@ -527,19 +553,35 @@ function buildWeekOptions(scope: string, latestDate: string) {
     return [{ label: '年初至今', value: latestDate }]
   }
 
-  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
-    const end = addUtcDays(start, 6)
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...monthWeekStarts(scope, latestDate).reverse().map((start) => {
+      const end = addUtcDays(start, 6)
 
-    return {
-      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
-      value: formatUtcDateKey(end),
-    }
-  })
+      return {
+        label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
   if (scope === 'ytd') return latestDate
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 
 function latestAvailableFinanceDate(start: Date, end: Date) {

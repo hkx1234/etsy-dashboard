@@ -8,6 +8,13 @@
         <h1>产品表现</h1>
       </div>
       <div class="period-controls">
+        <span>店铺</span>
+        <a-select
+          v-model:value="selectedShopScope"
+          :options="shopOptions"
+          class="period-select shop-select"
+          size="middle"
+        />
         <span>统计月份</span>
         <a-select
           v-model:value="selectedMonthScope"
@@ -332,6 +339,7 @@ const tagViewMode = ref('全部标签')
 const canViewTagPerformance = computed(() => getAuthUser()?.role === 'operator')
 const analysisModeOptions = computed(() => canViewTagPerformance.value ? ['商品表现', '标签表现'] : ['商品表现'])
 const dashboardData = ref(createFallbackEtsyDashboard())
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(monthScopeValue(dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const isSyncing = ref(false)
@@ -409,13 +417,22 @@ const priceBandDefinitions: Array<Pick<PriceBandRow, 'key' | 'label' | 'min' | '
 ]
 
 const tagShareColors = ['#2563eb', '#16a34a', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#65a30d', '#ea580c', '#94a3b8']
+const ALL_WEEKS_VALUE = 'all'
 
-const selectedPeriod = computed(() => selectedMonthScope.value === 'ytd' ? 'ytd' as const : 'week' as const)
+const selectedPeriod = computed(() => {
+  if (selectedMonthScope.value === 'ytd') return 'ytd' as const
+  if (selectedDataDate.value === ALL_WEEKS_VALUE) return 'month' as const
+  return 'week' as const
+})
 const currentDashboard = computed(() => dashboardData.value.periods[selectedPeriod.value])
 const productPerformance = computed(() => dashboardData.value.products[selectedPeriod.value] ?? [])
+const shopOptions = computed(() => buildShopOptions(dashboardData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
 const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate)
+  : selectedDataDate.value)
 
 const salesColumns = [
   { title: '商品', key: 'tag', dataIndex: 'tag', width: 320 },
@@ -498,6 +515,13 @@ const tagPagination = {
 
 function productOrderCount(item: ProductPerformance) {
   return Number(item.orderCount ?? item.orders ?? 0)
+}
+
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
 }
 
 function productSoldQuantity(item: ProductPerformance) {
@@ -767,19 +791,35 @@ function buildWeekOptions(scope: string, latestDate: string) {
     return [{ label: '年初至今', value: latestDate }]
   }
 
-  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
-    const end = addUtcDays(start, 6)
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...monthWeekStarts(scope, latestDate).reverse().map((start) => {
+      const end = addUtcDays(start, 6)
 
-    return {
-      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
-      value: formatUtcDateKey(end),
-    }
-  })
+      return {
+        label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
   if (scope === 'ytd') return latestDate
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 
 async function loadProductData(endDate?: string) {
@@ -788,7 +828,9 @@ async function loadProductData(endDate?: string) {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
     const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
-    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    }
   } catch {
     dashboardData.value = createFallbackEtsyDashboard()
   } finally {
@@ -798,7 +840,7 @@ async function loadProductData(endDate?: string) {
 }
 
 onMounted(() => {
-  void loadProductData(selectedDataDate.value)
+  void loadProductData(requestEndDate.value)
 })
 
 watch([analysisMode, canViewTagPerformance], ([mode, canView]) => {
@@ -809,14 +851,14 @@ watch([analysisMode, canViewTagPerformance], ([mode, canView]) => {
 
 watch(selectedDataDate, (date, oldDate) => {
   if (!date || !oldDate || date === oldDate) return
-  void loadProductData(date)
+  void loadProductData(requestEndDate.value)
 })
 
 watch(selectedMonthScope, (scope, oldScope) => {
   if (!scope || scope === oldScope) return
   const nextDate = defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
   if (nextDate === selectedDataDate.value) {
-    void loadProductData(nextDate)
+    void loadProductData(requestEndDate.value)
     return
   }
   selectedDataDate.value = nextDate

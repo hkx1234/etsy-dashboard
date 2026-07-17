@@ -2317,6 +2317,10 @@ select {
   width: 116px;
 }
 
+.shop-select {
+  width: 132px;
+}
+
 .date-select {
   width: 148px;
 }
@@ -3235,6 +3239,10 @@ select {
 
 .order-status-controls .period-select {
   width: 140px;
+}
+
+.order-status-controls .shop-select {
+  width: 132px;
 }
 
 .order-detail-controls {

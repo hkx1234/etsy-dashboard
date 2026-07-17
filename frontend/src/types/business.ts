@@ -179,6 +179,10 @@ export interface EtsyDashboardResponse {
   ok: boolean
   generatedAt: string
   sourceDir: string
+  shop: {
+    shopId: string
+    shopName: string
+  }
   availableDates: string[]
   selectedDate: string
   latestDate: string
@@ -341,6 +345,7 @@ export interface EtsyFinanceResponse {
   sourceDir: string
   shop: {
     shopId: string
+    shopName: string
   }
   availableDates: string[]
   selectedDate: string

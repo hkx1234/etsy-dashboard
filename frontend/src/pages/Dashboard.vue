@@ -19,6 +19,13 @@
         </p>
       </div>
       <div class="period-controls">
+        <span>店铺</span>
+        <a-select
+          v-model:value="selectedShopScope"
+          :options="shopOptions"
+          class="period-select shop-select"
+          size="middle"
+        />
         <span>统计月份</span>
         <a-select
           v-model:value="selectedMonthScope"
@@ -100,6 +107,7 @@ import { formatMoney, formatNumber } from '@/utils/format'
 use([BarChart, LineChart, PieChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 const dashboardData = ref(createFallbackEtsyDashboard())
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(monthScopeValue(dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const isSyncing = ref(false)
@@ -107,7 +115,13 @@ const hasLoaded = ref(false)
 const syncError = ref('')
 let autoRefreshTimer: number | undefined
 
-const selectedPeriod = computed(() => selectedMonthScope.value === 'ytd' ? 'ytd' as const : 'week' as const)
+const ALL_WEEKS_VALUE = 'all'
+
+const selectedPeriod = computed(() => {
+  if (selectedMonthScope.value === 'ytd') return 'ytd' as const
+  if (selectedDataDate.value === ALL_WEEKS_VALUE) return 'month' as const
+  return 'week' as const
+})
 const currentDashboard = computed(() => dashboardData.value.periods[selectedPeriod.value] ?? dashboardData.value.periods.week)
 const currentMetrics = computed(() => currentDashboard.value.metrics)
 const dashboardMetricCards = computed(() => currentMetrics.value.filter((item) => item.key !== 'best'))
@@ -126,8 +140,12 @@ const currentOrderAttribution = computed(() => currentDashboard.value.trafficSou
 const currentProducts = computed(() => dashboardData.value.products[selectedPeriod.value] ?? [])
 const bestProduct = computed(() => currentProducts.value[0])
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
+const shopOptions = computed(() => buildShopOptions(dashboardData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
 const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate)
+  : selectedDataDate.value)
 
 function formatComparisonValue(value: { current: number; previous: number; change: number; percentChange: number | null }) {
   const percentText = value.percentChange === null
@@ -142,13 +160,22 @@ function formatComparisonValue(value: { current: number; previous: number; chang
   }
 }
 
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
+}
+
 async function loadEtsyDashboard(endDate?: string) {
   isSyncing.value = true
   try {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
     const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
-    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    }
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : 'Etsy API 同步失败'
@@ -159,9 +186,9 @@ async function loadEtsyDashboard(endDate?: string) {
 }
 
 onMounted(() => {
-  void loadEtsyDashboard(selectedDataDate.value)
+  void loadEtsyDashboard(requestEndDate.value)
   autoRefreshTimer = window.setInterval(() => {
-    void loadEtsyDashboard(selectedDataDate.value)
+    void loadEtsyDashboard(requestEndDate.value)
   }, 10 * 60 * 1000)
 })
 
@@ -171,14 +198,14 @@ onUnmounted(() => {
 
 watch(selectedDataDate, (date, oldDate) => {
   if (!date || !oldDate || date === oldDate) return
-  void loadEtsyDashboard(date)
+  void loadEtsyDashboard(requestEndDate.value)
 })
 
 watch(selectedMonthScope, (scope, oldScope) => {
   if (!scope || scope === oldScope) return
   const nextDate = defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
   if (nextDate === selectedDataDate.value) {
-    void loadEtsyDashboard(nextDate)
+    void loadEtsyDashboard(requestEndDate.value)
     return
   }
   selectedDataDate.value = nextDate
@@ -268,20 +295,36 @@ function buildWeekOptions(scope: string, latestDate: string) {
 
   const starts = monthWeekStarts(scope, latestDate)
 
-  return starts.reverse().map((start) => {
-    const end = addUtcDays(start, 6)
-    const label = `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...starts.reverse().map((start) => {
+      const end = addUtcDays(start, 6)
+      const label = `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`
 
-    return {
-      label,
-      value: formatUtcDateKey(end),
-    }
-  })
+      return {
+        label,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
   if (scope === 'ytd') return latestDate
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 
 const weeklyTrendOption = computed(() => ({

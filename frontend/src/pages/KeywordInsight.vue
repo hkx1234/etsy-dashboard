@@ -22,6 +22,13 @@
         </p>
       </div>
       <div class="period-controls">
+        <span>店铺</span>
+        <a-select
+          v-model:value="selectedShopScope"
+          :options="shopOptions"
+          class="period-select shop-select"
+          size="middle"
+        />
         <span>统计月份</span>
         <a-select
           v-model:value="selectedMonthScope"
@@ -216,6 +223,7 @@ use([BarChart, LineChart, GridComponent, LegendComponent, TooltipComponent, Canv
 const marketScope = ref<MarketKeywordScope>('category')
 const dashboardData = ref(createFallbackEtsyDashboard())
 const marketData = ref(createFallbackMarketKeywords(marketScope.value))
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(monthScopeValue(dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const selectedDataDate = ref(defaultWeekEndForScope(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate))
 const isSyncing = ref(false)
@@ -226,8 +234,13 @@ const syncError = ref('')
 const marketError = ref('')
 const isMarketRankingExpanded = ref(false)
 const MARKET_RANKING_PREVIEW_SIZE = 8
+const ALL_WEEKS_VALUE = 'all'
 
-const selectedPeriod = computed(() => selectedMonthScope.value === 'ytd' ? 'ytd' as const : 'week' as const)
+const selectedPeriod = computed(() => {
+  if (selectedMonthScope.value === 'ytd') return 'ytd' as const
+  if (selectedDataDate.value === ALL_WEEKS_VALUE) return 'month' as const
+  return 'week' as const
+})
 const currentAd = computed(() => dashboardData.value.ads.periods[selectedPeriod.value])
 const isInitialLoading = computed(() =>
   (isSyncing.value && !hasLoadedAdDashboard.value) ||
@@ -237,16 +250,24 @@ const currentTrendTitle = computed(() => dashboardData.value.periods[selectedPer
   .replace('每日趋势', '广告每日趋势')
   .replace('周期对比', '广告周期对比')
   .replace('月度趋势', '广告月度趋势'))
+const shopOptions = computed(() => buildShopOptions(dashboardData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
 const weekOptions = computed(() => buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate)
+  : selectedDataDate.value)
 const allAdRows = computed(() => [...dashboardData.value.ads.rows].sort((a, b) => b.date.localeCompare(a.date)))
 const scopedAdRows = computed(() => {
-  const endDate = selectedMonthScope.value === 'ytd'
+  const endDate = selectedDataDate.value === ALL_WEEKS_VALUE
+    ? requestEndDate.value
+    : selectedMonthScope.value === 'ytd'
     ? dashboardData.value.latestDate || selectedDataDate.value
     : selectedDataDate.value
   const end = parseUtcDateKey(endDate)
   const start = selectedMonthScope.value === 'ytd'
     ? new Date(Date.UTC(end.getUTCFullYear(), 0, 1))
+    : selectedDataDate.value === ALL_WEEKS_VALUE
+    ? startOfUtcMonth(end)
     : startOfUtcWeek(end)
   const startKey = formatUtcDateKey(start)
   const endKey = formatUtcDateKey(end)
@@ -256,9 +277,9 @@ const scopedAdRows = computed(() => {
 const adSpendComparison = computed(() => {
   const currentSpend = Number(currentAd.value.spend || 0)
 
-  if (selectedMonthScope.value === 'ytd') {
+  if (selectedMonthScope.value === 'ytd' || selectedDataDate.value === ALL_WEEKS_VALUE) {
     return {
-      text: '广告花费 Year to Date 累计',
+      text: selectedMonthScope.value === 'ytd' ? '广告花费 Year to Date 累计' : '广告花费统计月份累计',
       value: formatMoney(currentSpend),
       detail: '',
       tone: 'flat',
@@ -347,7 +368,9 @@ async function loadAdDashboard(endDate = selectedDataDate.value) {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
     const responseDate = data.selectedDate || selectedDataDate.value || data.latestDate
-    selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd' ? data.latestDate || responseDate : weekEndDateKey(responseDate)
+    }
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : '广告报表同步失败'
@@ -371,20 +394,20 @@ async function loadMarketKeywords(force = false) {
 }
 
 onMounted(() => {
-  void loadAdDashboard(selectedDataDate.value)
+  void loadAdDashboard(requestEndDate.value)
   void loadMarketKeywords()
 })
 
 watch(selectedDataDate, (date, oldDate) => {
   if (!date || !oldDate || date === oldDate) return
-  void loadAdDashboard(date)
+  void loadAdDashboard(requestEndDate.value)
 })
 
 watch(selectedMonthScope, (scope, oldScope) => {
   if (!scope || scope === oldScope) return
   const nextDate = defaultWeekEndForScope(scope, dashboardData.value.latestDate || selectedDataDate.value)
   if (nextDate === selectedDataDate.value) {
-    void loadAdDashboard(nextDate)
+    void loadAdDashboard(requestEndDate.value)
     return
   }
   selectedDataDate.value = nextDate
@@ -433,6 +456,13 @@ function monthScopeLabel(value: string) {
   return `${year}年${Number(month)}月`
 }
 
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
+}
+
 function weekEndDateKey(dateKey: string) {
   return formatUtcDateKey(addUtcDays(startOfUtcWeek(parseUtcDateKey(dateKey)), 6))
 }
@@ -479,19 +509,39 @@ function buildWeekOptions(scope: string, latestDate: string) {
     return [{ label: '年初至今', value: latestDate }]
   }
 
-  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
-    const end = addUtcDays(start, 6)
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...monthWeekStarts(scope, latestDate).reverse().map((start) => {
+      const end = addUtcDays(start, 6)
 
-    return {
-      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
-      value: formatUtcDateKey(end),
-    }
-  })
+      return {
+        label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
   if (scope === 'ytd') return latestDate
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function startOfUtcMonth(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 
 function sumAdSpendBetween(start: Date, end: Date) {

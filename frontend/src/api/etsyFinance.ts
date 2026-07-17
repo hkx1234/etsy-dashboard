@@ -64,6 +64,7 @@ export function createFallbackEtsyFinance(): EtsyFinanceResponse {
     sourceDir: 'Etsy Payments / Ledger',
     shop: {
       shopId: '',
+      shopName: '',
     },
     availableDates: [today],
     selectedDate: today,

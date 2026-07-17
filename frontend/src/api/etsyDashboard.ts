@@ -39,6 +39,10 @@ export function createFallbackEtsyDashboard(): EtsyDashboardResponse {
     ok: false,
     generatedAt: '',
     sourceDir: 'Etsy Open API v3',
+    shop: {
+      shopId: '',
+      shopName: '',
+    },
     availableDates: [today],
     selectedDate: today,
     latestDate: today,

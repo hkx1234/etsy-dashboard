@@ -10,6 +10,9 @@
             <template v-if="selectedMonthScope === 'ytd'">
               <span>Year to Date 共 {{ formatNumber(activeScopedOrders.length) }} 个有效订单，其中待发货 {{ formatNumber(pendingOrderCount) }} 单，已发货 {{ formatNumber(shippedOrderCount) }} 单。</span>
             </template>
+            <template v-else-if="selectedDataDate === 'all'">
+              <span>当前统计月份共 {{ formatNumber(activeScopedOrders.length) }} 个有效订单，其中待发货 {{ formatNumber(pendingOrderCount) }} 单，已发货 {{ formatNumber(shippedOrderCount) }} 单。</span>
+            </template>
             <template v-else>
               <span>有效订单较上个自然周{{ orderComparisonSummary.direction }} {{ formatNumber(Math.abs(orderComparisonSummary.change)) }} 单</span>
               <span :class="['order-change-pill', `is-${orderComparisonSummary.tone}`]">{{ orderComparisonSummary.percentText }}</span>
@@ -18,6 +21,13 @@
           </p>
         </div>
         <div class="period-controls order-status-controls">
+          <span>店铺</span>
+          <a-select
+            v-model:value="selectedShopScope"
+            :options="shopOptions"
+            class="period-select shop-select"
+            size="middle"
+          />
           <span>统计月份</span>
           <a-select
             v-model:value="selectedMonthScope"
@@ -158,8 +168,14 @@ const route = useRoute()
 const router = useRouter()
 const dashboardData = ref<EtsyDashboardResponse>(createFallbackEtsyDashboard())
 const initialDataDate = String(route.query.endDate || dashboardData.value.selectedDate)
+const ALL_WEEKS_VALUE = 'all'
+const selectedShopScope = ref('grain-and-grace')
 const selectedMonthScope = ref(normalizeMonthScope(route.query.scope, initialDataDate))
-const selectedDataDate = ref(selectedMonthScope.value === 'ytd' ? initialDataDate : weekEndDateKey(initialDataDate))
+const selectedDataDate = ref(selectedMonthScope.value === 'ytd'
+  ? initialDataDate
+  : String(route.query.endDate || '') === ALL_WEEKS_VALUE
+  ? ALL_WEEKS_VALUE
+  : weekEndDateKey(initialDataDate))
 const statusFilter = ref<OrderStatusFilter>(normalizeStatusFilter(route.query.status))
 const orderSearchKeyword = ref('')
 const isSyncing = ref(false)
@@ -189,17 +205,25 @@ const columns = [
 const fulfillment = computed(() => dashboardData.value.fulfillment)
 const allOrders = computed(() => fulfillment.value.orders?.length ? fulfillment.value.orders : fulfillment.value.items)
 const isInitialLoading = computed(() => isSyncing.value && !hasLoaded.value)
+const shopOptions = computed(() => buildShopOptions(dashboardData.value.shop))
 const monthScopeOptions = computed(() => buildMonthScopeOptions(dashboardData.value.latestDate || selectedDataDate.value))
 const weekOptions = computed(() => selectedMonthScope.value === 'ytd'
   ? [{ label: '年初至今', value: selectedDataDate.value }]
   : buildWeekOptions(selectedMonthScope.value, dashboardData.value.latestDate || selectedDataDate.value))
+const requestEndDate = computed(() => selectedDataDate.value === ALL_WEEKS_VALUE
+  ? monthEndDateKey(selectedMonthScope.value, dashboardData.value.latestDate || dashboardData.value.selectedDate)
+  : selectedDataDate.value)
 const scopedOrders = computed(() => {
-  const endDate = selectedMonthScope.value === 'ytd'
+  const endDate = selectedDataDate.value === ALL_WEEKS_VALUE
+    ? requestEndDate.value
+    : selectedMonthScope.value === 'ytd'
     ? dashboardData.value.latestDate || selectedDataDate.value
     : selectedDataDate.value
   const end = parseUtcDateKey(endDate)
   const start = selectedMonthScope.value === 'ytd'
     ? new Date(Date.UTC(end.getUTCFullYear(), 0, 1))
+    : selectedDataDate.value === ALL_WEEKS_VALUE
+    ? startOfUtcMonth(end)
     : startOfUtcWeek(end)
   const startKey = formatUtcDateKey(start)
   const endKey = formatUtcDateKey(end)
@@ -249,6 +273,13 @@ function normalizeStatusFilter(value: unknown): OrderStatusFilter {
   return ['pending', 'shipped', 'overdue', 'unpaid', 'canceled'].includes(text) ? text as OrderStatusFilter : 'all'
 }
 
+function buildShopOptions(_shop?: { shopId?: string; shopName?: string }) {
+  return [
+    { label: 'GrainAndGraceJewelry', value: 'grain-and-grace' },
+    { label: '其他店铺', value: 'other' },
+  ]
+}
+
 function orderMatchesFilter(order: FulfillmentOrder, filter: OrderStatusFilter) {
   if (filter === 'pending') return order.isPendingShipment
   if (filter === 'shipped') return order.isShipped && !order.isCanceled
@@ -296,9 +327,11 @@ async function loadOrders(endDate?: string) {
   try {
     const data = await fetchEtsyDashboard(endDate)
     dashboardData.value = data
-    selectedDataDate.value = selectedMonthScope.value === 'ytd'
-      ? data.latestDate || data.selectedDate
-      : weekEndDateKey(data.selectedDate || data.latestDate)
+    if (selectedDataDate.value !== ALL_WEEKS_VALUE) {
+      selectedDataDate.value = selectedMonthScope.value === 'ytd'
+        ? data.latestDate || data.selectedDate
+        : weekEndDateKey(data.selectedDate || data.latestDate)
+    }
     syncError.value = ''
   } catch (error) {
     syncError.value = error instanceof Error ? error.message : 'Etsy 订单状态同步失败'
@@ -320,13 +353,13 @@ function syncQuery() {
 }
 
 onMounted(() => {
-  void loadOrders(selectedDataDate.value)
+  void loadOrders(requestEndDate.value)
 })
 
 watch(selectedDataDate, (date, oldDate) => {
   if (!date || !oldDate || date === oldDate) return
   syncQuery()
-  void loadOrders(date)
+  void loadOrders(requestEndDate.value)
 })
 
 watch(selectedMonthScope, (scope, oldScope) => {
@@ -337,7 +370,7 @@ watch(selectedMonthScope, (scope, oldScope) => {
 
   if (nextDate === selectedDataDate.value) {
     syncQuery()
-    void loadOrders(nextDate)
+    void loadOrders(requestEndDate.value)
     return
   }
 
@@ -363,6 +396,10 @@ function addUtcDays(date: Date, days: number) {
 function startOfUtcWeek(date: Date) {
   const day = date.getUTCDay() || 7
   return addUtcDays(new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())), 1 - day)
+}
+
+function startOfUtcMonth(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
 }
 
 function monthScopeValue(dateKey: string) {
@@ -417,16 +454,32 @@ function monthWeekStarts(scope: string, latestDate: string) {
 }
 
 function buildWeekOptions(scope: string, latestDate: string) {
-  return monthWeekStarts(scope, latestDate).reverse().map((start) => {
-    const end = addUtcDays(start, 6)
-    return {
-      label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
-      value: formatUtcDateKey(end),
-    }
-  })
+  return [
+    { label: '全部', value: ALL_WEEKS_VALUE },
+    ...monthWeekStarts(scope, latestDate).reverse().map((start) => {
+      const end = addUtcDays(start, 6)
+      return {
+        label: `${formatUtcDateKey(start)} - ${formatUtcDateKey(end)}`,
+        value: formatUtcDateKey(end),
+      }
+    }),
+  ]
 }
 
 function defaultWeekEndForScope(scope: string, latestDate: string) {
-  return buildWeekOptions(scope, latestDate)[0]?.value || weekEndDateKey(latestDate)
+  return buildWeekOptions(scope, latestDate).find((item) => item.value !== ALL_WEEKS_VALUE)?.value || weekEndDateKey(latestDate)
+}
+
+function monthEndDateKey(scope: string, latestDate: string) {
+  if (scope === 'ytd') return latestDate
+  const [year, month] = scope.split('-').map(Number)
+  const latest = parseUtcDateKey(latestDate)
+  const monthEnd = addUtcDays(new Date(Date.UTC(year, month, 1)), -1)
+
+  if (latest.getUTCFullYear() === year && latest.getUTCMonth() === month - 1 && latest < monthEnd) {
+    return formatUtcDateKey(latest)
+  }
+
+  return formatUtcDateKey(monthEnd)
 }
 </script>
